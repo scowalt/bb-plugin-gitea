@@ -158,8 +158,19 @@ const conversationBase = itemSchema.omit({ kind: true }).extend({
   comments: z.array(commentSchema),
   commentsTruncated: z.boolean(),
 });
+const issueLinkSchema = z.object({
+  repo: repositorySchema,
+  number: z.number().int().positive(),
+  title: z.string(),
+  state: z.enum(["open", "closed"]),
+  url: z.string(),
+});
+const issueRelationsSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("loaded"), blockers: z.array(issueLinkSchema), blocking: z.array(issueLinkSchema), truncated: z.boolean() }),
+  z.object({ state: z.literal("unavailable") }),
+]);
 const conversationSchema = z.discriminatedUnion("kind", [
-  conversationBase.extend({ kind: z.literal("issue") }),
+  conversationBase.extend({ kind: z.literal("issue"), relations: issueRelationsSchema }),
   conversationBase.extend({
     kind: z.literal("pr"),
     headRefName: z.string(),
@@ -1260,6 +1271,39 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
+  async function readIssueRelations(repo: string, number: number, signal: AbortSignal) {
+    const base = cleanBaseUrl(config.baseUrl);
+    try {
+      const [dependencies, blocks] = await Promise.all([
+        paginated(repoPath(repo, `issues/${number}/dependencies`), signal),
+        paginated(repoPath(repo, `issues/${number}/blocks`), signal),
+      ]);
+      const links = (values: unknown[]) => values.map((raw) => {
+        const row = record(raw);
+        const url = safeLink(base, row.html_url);
+        const path = url ? new URL(url).pathname : "";
+        const prefix = base.pathname.replace(/\/$/, "");
+        const match = path.startsWith(`${prefix}/`)
+          ? /^\/([^/]+)\/([^/]+)\/issues\/([1-9]\d*)$/.exec(path.slice(prefix.length))
+          : null;
+        const linkedRepo = match ? `${match[1]}/${match[2]}` : "";
+        if (!match || !repositorySchema.safeParse(linkedRepo).success || Number(match[3]) !== row.number) return null;
+        return issueLinkSchema.parse({
+          repo: linkedRepo, number: row.number, title: text(row.title),
+          state: text(row.state).toLowerCase() === "open" ? "open" : "closed", url,
+        });
+      }).filter((link): link is z.infer<typeof issueLinkSchema> => link !== null);
+      return issueRelationsSchema.parse({
+        state: "loaded", blockers: links(dependencies.values), blocking: links(blocks.values),
+        truncated: dependencies.truncated || blocks.truncated,
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      bb.log.warn(`Could not read issue relations for ${repo}#${number}: ${error instanceof Error ? error.message : "unknown error"}`);
+      return { state: "unavailable" as const };
+    }
+  }
+
   async function readConversation(
     repo: string,
     number: number,
@@ -1267,7 +1311,7 @@ export default async function plugin(bb: BbPluginApi) {
     signal: AbortSignal,
   ): Promise<Conversation> {
     const base = cleanBaseUrl(config.baseUrl);
-    const [issue, thread, pull] = await Promise.all([
+    const [issue, thread, pull, relations] = await Promise.all([
       api(repoPath(repo, `issues/${number}`), { signal }),
       readComments(repo, number, signal),
       kind === "pr"
@@ -1279,6 +1323,7 @@ export default async function plugin(bb: BbPluginApi) {
             readReviews(repo, number, signal),
           ])
         : null,
+      kind === "issue" ? readIssueRelations(repo, number, signal) : null,
     ]);
     const { kind: _kind, ...item } = mapItem(repo, issue, kind, base);
     const common = {
@@ -1286,7 +1331,7 @@ export default async function plugin(bb: BbPluginApi) {
       comments: thread.comments,
       commentsTruncated: thread.truncated,
     };
-    if (pull === null) return conversationSchema.parse({ ...common, kind });
+    if (pull === null) return conversationSchema.parse({ ...common, kind, relations });
     const [loaded, reviewPage] = pull;
     return conversationSchema.parse({
       ...common,

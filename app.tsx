@@ -25,6 +25,7 @@ import {
 import type { PluginRpcClient, PluginRpcResult } from "@get-bb/plugin-sdk/app";
 import type { giteaRpcContract } from "./server.js";
 import { GITEA_BRANCH_ENVIRONMENT_PROVIDER_ID } from "./branch-inputs.js";
+import { issueReferences } from "./issue-references.js";
 import { GiteaBranchInputsControl } from "./environment-picker.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2138,6 +2139,13 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
   if (route?.kind === "item" && shown.state === "ready") {
     const detail = shown.value.conversation;
     const threadId = shown.value.threadId;
+    const related = detail.kind === "issue"
+      ? issueReferences(detail.url, detail.repo, detail.number, [detail.body, ...detail.comments.map((comment) => comment.body)])
+      : [];
+    const openLinkedIssue = (repo: string, number: number) =>
+      navigate.toPluginPanel("gitea", {
+        subPath: routePath({ kind: "item", item: { kind: "issue", repo, number } }),
+      });
     const header = (
       <div className="shrink-0 px-4 pt-4 md:px-5 md:pt-5">
         <div className="mx-auto w-full max-w-5xl space-y-3">
@@ -2312,6 +2320,39 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                 }
               />
             </section>
+            {detail.kind === "issue" && (
+              <section className="space-y-3 rounded-lg border border-border bg-card p-3">
+                <h3 className="text-xs font-semibold text-muted-foreground">Issue links</h3>
+                {detail.relations.state === "unavailable" ? (
+                  <p role="status" className="text-xs text-muted-foreground">Blockers unavailable.</p>
+                ) : (
+                  <>
+                    {detail.relations.truncated && <p className="text-xs text-muted-foreground">Dependency lists may be incomplete.</p>}
+                    {([
+                      ["Blocked by", detail.relations.blockers],
+                      ["Blocking", detail.relations.blocking],
+                    ] as const).map(([label, links]) => (
+                      <div key={label} className="space-y-1">
+                        <h4 className="text-xs font-medium">{label}</h4>
+                        {links.length ? links.map((link) => (
+                          <button key={`${link.repo}#${link.number}`} type="button" onClick={() => openLinkedIssue(link.repo, link.number)} className="block w-full min-w-0 truncate text-left text-xs underline hover:text-foreground" title={link.title}>
+                            {link.repo}#{link.number} · {link.title} ({link.state})
+                          </button>
+                        )) : <p className="text-xs text-muted-foreground">None</p>}
+                      </div>
+                    ))}
+                  </>
+                )}
+                <div className="space-y-1">
+                  <h4 className="text-xs font-medium">Related references</h4>
+                  {related.length ? related.map((link) => (
+                    <button key={`${link.repo}#${link.number}`} type="button" onClick={() => openLinkedIssue(link.repo, link.number)} className="block text-left text-xs underline hover:text-foreground">
+                      {link.repo}#{link.number}
+                    </button>
+                  )) : <p className="text-xs text-muted-foreground">None</p>}
+                </div>
+              </section>
+            )}
             {detail.kind === "pr" && (
               <>
                 <section className="overflow-hidden rounded-lg border border-border bg-card">

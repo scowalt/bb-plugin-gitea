@@ -45,6 +45,7 @@ An issue or pull request opens on **Conversation**, where you can:
 - close or reopen, and mark a pull request as a draft or ready;
 - review (comment, request changes, approve);
 - see checks (click one to open its run) and reviews;
+- follow issue sidebar links: **Blocked by** and **Blocking** come from Gitea dependencies, while **Related references** are issue mentions in the description and comments (`#N`, `owner/repo#N`, or same-instance issue URLs). Clicking one opens that issue in the Gitea plugin panel. These are not editable relationships; failed dependency reads show **Blockers unavailable** rather than an empty list.
 - draft an agent thread (**Draft with agent** pre-fills the BB compose form so you can add skills before submitting).
 
 **Files changed** shows a file tree and diffs, unified or split. Click the `+` beside a line to leave a line comment; existing line comments appear under their line and in the conversation.

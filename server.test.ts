@@ -1187,6 +1187,30 @@ it("finds a legacy thread key when the repository casing differs", async () => {
   });
 });
 
+it("loads both directions of issue dependencies without hiding the issue when links fail", async () => {
+  const { host, calls } = await start(({ endpoint }) => {
+    if (endpoint.endsWith("/issues/4")) return { json: issue(4) };
+    if (endpoint.includes("/issues/4/comments")) return { json: [] };
+    if (endpoint.includes("/issues/4/dependencies")) return { json: [issue(5, "Blocks me")] };
+    if (endpoint.includes("/issues/4/blocks")) return { json: [{ ...issue(6, "I block"), html_url: "https://gitea.example/prefix/other/api/issues/6" }] };
+    return { status: 404 };
+  });
+  const result = await conversation(host, { kind: "issue", number: 4 });
+  expect(result.conversation).toMatchObject({
+    relations: { state: "loaded", blockers: [{ repo: "acme/widgets", number: 5, title: "Blocks me" }], blocking: [{ repo: "other/api", number: 6, title: "I block" }] },
+  });
+  expect(calls.filter(call => /\/issues\/4\/(dependencies|blocks)/.test(call.endpoint))).toHaveLength(2);
+});
+
+it("marks issue dependencies unavailable without losing the conversation", async () => {
+  const { host } = await start(({ endpoint }) => {
+    if (endpoint.endsWith("/issues/4")) return { json: issue(4) };
+    if (endpoint.includes("/issues/4/comments")) return { json: [] };
+    return { status: 404 };
+  });
+  expect((await conversation(host, { kind: "issue", number: 4 })).conversation).toMatchObject({ title: "Issue 4", relations: { state: "unavailable" } });
+});
+
 it("reads the pull request conversation without files, loads files on request, and serves repeats from cache", async () => {
   const { host, calls } = await start(
     diffApi(

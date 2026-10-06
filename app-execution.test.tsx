@@ -78,15 +78,22 @@ it("guards comment keyboard submission and locks the composer while posting", as
         freshness, threadId: null,
         conversation: {
           repo: "acme/widgets", number: 10, kind: "issue", title: "Issue detail",
-          state: "open", author: "dev", labels: [], assignees: [], body: "",
+          state: "open", author: "dev", labels: [], assignees: [], body: "See #12",
           url: "https://gitea.example/acme/widgets/issues/10", updatedAt: freshness.fetchedAt,
           comments: [], commentsTruncated: false,
+          relations: { state: "loaded", blockers: [{ repo: "acme/widgets", number: 11, title: "Prerequisite", state: "open", url: "https://gitea.example/acme/widgets/issues/11" }], blocking: [], truncated: false },
         },
       }),
       comment: async () => { await held; return { ok: true }; },
     },
   });
   const composer = await screen.findByPlaceholderText("Write a comment");
+  fireEvent.click(screen.getByRole("button", { name: /Prerequisite/ }));
+  fireEvent.click(screen.getByRole("button", { name: "acme/widgets#12" }));
+  expect(slot.navigateCalls.slice(-2)).toEqual([
+    { method: "toPluginPanel", path: "gitea", options: { subPath: "issues/acme/widgets/11" } },
+    { method: "toPluginPanel", path: "gitea", options: { subPath: "issues/acme/widgets/12" } },
+  ]);
   fireEvent.change(composer, { target: { value: "A comment" } });
   fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
   fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
