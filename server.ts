@@ -357,6 +357,14 @@ export const giteaRpcContract = defineRpcContract({
     }),
     output: z.object({ threadId: z.string().min(1) }),
   },
+  draftAgent: {
+    input: z.object({
+      repo: repositorySchema,
+      number: z.number().int().positive(),
+      kind: z.enum(["issue", "pr"]),
+    }),
+    output: z.object({ prompt: z.string().min(1) }),
+  },
   getAgentExecution: {
     input: z.null(),
     output: z.object({ execution: autoFixerExecutionSchema.nullable() }),
@@ -1685,6 +1693,52 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
 
+  async function agentPrompt(
+    repo: string,
+    number: number,
+    kind: "issue" | "pr",
+    signal?: AbortSignal,
+  ) {
+    const item = mapItem(
+      repo,
+      await api(repoPath(repo, `issues/${number}`), { signal }),
+      kind,
+      cleanBaseUrl(config.baseUrl),
+    );
+    const ref = `${repo}#${number}`;
+    const instructions =
+      kind === "issue"
+        ? `Read the Gitea issue ${ref}, inspect its comments, and work on the requested change in the project checkout. Do not post or mutate Gitea unless asked.`
+        : `Review Gitea pull request ${ref} and its changed files for correctness, missing tests, and design issues. Report findings with file and line references. Do not post or mutate Gitea unless asked.`;
+    const [commentPage, filePage] = await Promise.all([
+      paginated(repoPath(repo, `issues/${number}/comments`), signal),
+      kind === "pr"
+        ? paginated(repoPath(repo, `pulls/${number}/files`), signal, 2)
+        : Promise.resolve({ values: [], truncated: false }),
+    ]);
+    const comments = commentPage.values.slice(-10).map((value) => {
+      const comment = record(value);
+      return `${actor(comment)}: ${text(comment.body).slice(0, 2000)}`;
+    });
+    const files = filePage.values.slice(0, 10).map((value) => {
+      const file = record(value);
+      return `${text(file.filename)}\n${text(file.patch).slice(0, 3000)}`;
+    });
+    const context = [
+      instructions,
+      `Title: ${item.title}`,
+      `State: ${item.state}`,
+      `URL: ${item.url}`,
+      "",
+      item.body.slice(0, 16000),
+      comments.length ? `\nRecent comments:\n${comments.join("\n\n")}` : "",
+      files.length ? `\nChanged files:\n${files.join("\n\n")}` : "",
+    ]
+      .join("\n")
+      .slice(0, 60000);
+    return { item, context };
+  }
+
   async function agentExecution() {
     const parsed = autoFixerExecutionSchema.safeParse(
       await bb.storage.kv.get<unknown>(agentExecutionKey),
@@ -2891,43 +2945,8 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(
           `No BB project is associated with ${repo}. Attach a project checkout or use another repository.`,
         );
-      const item = mapItem(
-        repo,
-        await api(repoPath(repo, `issues/${number}`), { signal }),
-        kind,
-        cleanBaseUrl(config.baseUrl),
-      );
+      const { item, context } = await agentPrompt(repo, number, kind, signal);
       const ref = `${repo}#${number}`;
-      const instructions =
-        kind === "issue"
-          ? `Read the Gitea issue ${ref}, inspect its comments, and work on the requested change in the project checkout. Do not post or mutate Gitea unless asked.`
-          : `Review Gitea pull request ${ref} and its changed files for correctness, missing tests, and design issues. Report findings with file and line references. Do not post or mutate Gitea unless asked.`;
-      const [commentPage, filePage] = await Promise.all([
-        paginated(repoPath(repo, `issues/${number}/comments`), signal),
-        kind === "pr"
-          ? paginated(repoPath(repo, `pulls/${number}/files`), signal, 2)
-          : Promise.resolve({ values: [], truncated: false }),
-      ]);
-      const comments = commentPage.values.slice(-10).map((value) => {
-        const comment = record(value);
-        return `${actor(comment)}: ${text(comment.body).slice(0, 2000)}`;
-      });
-      const files = filePage.values.slice(0, 10).map((value) => {
-        const file = record(value);
-        return `${text(file.filename)}\n${text(file.patch).slice(0, 3000)}`;
-      });
-      const context = [
-        instructions,
-        `Title: ${item.title}`,
-        `State: ${item.state}`,
-        `URL: ${item.url}`,
-        "",
-        item.body.slice(0, 16000),
-        comments.length ? `\nRecent comments:\n${comments.join("\n\n")}` : "",
-        files.length ? `\nChanged files:\n${files.join("\n\n")}` : "",
-      ]
-        .join("\n")
-        .slice(0, 60000);
       const execution = await agentExecution();
       const thread = await bb.sdk.threads.spawn({
         projectId: known.projectId,
@@ -2955,6 +2974,10 @@ export default async function plugin(bb: BbPluginApi) {
       });
       return { threadId: thread.id };
     },
+    draftAgent: async (
+      { repo, number, kind },
+      { experimental_signal: signal }: RpcContext = {},
+    ) => ({ prompt: (await agentPrompt(repo, number, kind, signal)).context }),
     getAgentExecution: async () => ({ execution: await agentExecution() }),
     setAgentExecution: async ({ execution }) => {
       if (execution) await bb.storage.kv.set(agentExecutionKey, execution);

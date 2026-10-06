@@ -52,7 +52,7 @@ Turning either on starts an auto-fixer: a hidden BB thread on the host of the re
 
 Reads: `status`, `refresh`, `listItems`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItem`.
 
-Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
+Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
 
 Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `retryAutoFixer`, `getAutoFixerStatus`, `autoFixerThread`, `listAutoFixerSessions`, `getAutoFixerPreferences`, `setAutoAutomation` (`fix`, `merge`, or both), `setAutoFixerExecution`.
 

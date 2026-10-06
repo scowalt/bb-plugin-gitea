@@ -45,7 +45,7 @@ An issue or pull request opens on **Conversation**, where you can:
 - close or reopen, and mark a pull request as a draft or ready;
 - review (comment, request changes, approve);
 - see checks (click one to open its run) and reviews;
-- hand the item to an agent thread (**Review with agent** or **Send agent**). The model picker beside it sets the model for these threads; clear it to use the project default.
+- draft an agent thread (**Draft with agent** pre-fills the BB compose form so you can add skills before submitting).
 
 **Files changed** shows a file tree and diffs, unified or split. Click the `+` beside a line to leave a line comment; existing line comments appear under their line and in the conversation.
 

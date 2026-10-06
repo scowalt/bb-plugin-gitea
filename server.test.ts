@@ -3007,6 +3007,15 @@ it("starts send-agent threads with the chosen model or the project default", asy
   });
 });
 
+it("drafts the agent prompt without starting a thread", async () => {
+  const { host } = await startAutoFixers();
+  const { prompt } = (await rpc(host, "draftAgent", { ...pr42, kind: "pr" })) as {
+    prompt: string;
+  };
+  expect(prompt).toContain("Review Gitea pull request acme/widgets#42");
+  expect(host.harness.sdk.callsTo("threads.spawn")).toHaveLength(0);
+});
+
 it("finds send-agent threads when the repository spelling changes case", async () => {
   const { host } = await startAutoFixers();
   await rpc(host, "sendAgent", { repo: "Acme/Widgets", number: 42, kind: "pr" });

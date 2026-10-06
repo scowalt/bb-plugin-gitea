@@ -1581,87 +1581,6 @@ function AutoFixerControls({
   );
 }
 
-function AgentExecutionControl() {
-  const rpc = useRpc<typeof giteaRpcContract>();
-  const [execution, setExecution] = useState<
-    ExperimentalProviderModelPickerValue | null | undefined
-  >(undefined);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    void rpc
-      .call("getAgentExecution", null)
-      .then((value) => setExecution(value.execution))
-      .catch(() => setExecution(null));
-  }, [rpc]);
-  const save = async (next: ExperimentalProviderModelPickerValue | null) => {
-    const previous = execution;
-    const stored = next && {
-      ...next,
-      serviceTier: next.serviceTier ?? "default",
-    };
-    // The host picker can emit its normalized value on render. Treat an
-    // omitted service tier as default so unchanged selections never save
-    // or trigger another render/normalization cycle.
-    if (
-      previous === stored ||
-      (previous && stored &&
-        previous.providerId === stored.providerId &&
-        previous.model === stored.model &&
-        previous.reasoningLevel === stored.reasoningLevel &&
-        (previous.serviceTier ?? "default") === stored.serviceTier)
-    ) return;
-    setExecution(stored);
-    setSaving(true);
-    try {
-      await rpc.call("setAgentExecution", { execution: stored });
-    } catch (error) {
-      setExecution(previous);
-      toast.error(
-        error instanceof Error ? error.message : "Could not save agent model",
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-  if (execution === undefined) return null;
-  if (execution === null)
-    return (
-      <Button
-        size="sm"
-        variant="ghost"
-        className="text-muted-foreground"
-        disabled={saving}
-        onClick={() =>
-          void rpc
-            .call("getAutoFixerPreferences", null)
-            .then((preferences) => save(preferences.execution))
-        }
-      >
-        Agent: project default
-      </Button>
-    );
-  return (
-    <div className="flex items-center gap-1">
-      <ProviderModelPicker
-        value={execution}
-        disabled={saving}
-        align="end"
-        onChange={(value) => void save(value)}
-      />
-      <Button
-        size="icon"
-        variant="ghost"
-        className="size-7"
-        disabled={saving}
-        aria-label="Use the project default model"
-        onClick={() => void save(null)}
-      >
-        <Icon name="X" className="size-3" />
-      </Button>
-    </div>
-  );
-}
-
 function AutoFixerPreferencesControl() {
   const rpc = useRpc<typeof giteaRpcContract>();
   const [loaded, setLoaded] = useState<Loadable<Preferences>>(() =>
@@ -2036,25 +1955,21 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
     },
     [detail, refreshDetail, reviewBody, reviewPending, rpc],
   );
-  const sendAgent = useCallback(async () => {
+  const draftAgent = useCallback(async () => {
     if (!detail) return;
     try {
-      const result = await rpc.call("sendAgent", {
+      const { prompt } = await rpc.call("draftAgent", {
         repo: detail.repo,
         number: detail.number,
         kind: detail.kind,
       });
-      await refreshDetail();
-      navigate.toThread(result.threadId);
-      toast.success("BB agent thread created");
+      navigate.toCompose({ initialPrompt: prompt, focusPrompt: true });
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Could not start an agent thread",
+        error instanceof Error ? error.message : "Could not draft an agent prompt",
       );
     }
-  }, [detail, navigate, openItem, refreshDetail, rpc]);
+  }, [detail, navigate, rpc]);
   const saveMetadata = useCallback(
     async (labels: string[], assignees: string[]) => {
       if (!detail) return;
@@ -2287,9 +2202,8 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                 {detail.draft ? "Mark ready" : "Convert to draft"}
               </Button>
             )}
-            <AgentExecutionControl />
-            <Button size="sm" onClick={() => void sendAgent()}>
-              {detail.kind === "pr" ? "Review with agent" : "Send agent"}
+            <Button size="sm" onClick={() => void draftAgent()}>
+              Draft with agent
             </Button>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
