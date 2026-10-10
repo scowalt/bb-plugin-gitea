@@ -25,7 +25,7 @@ The plugin id is `gitea` and it adds the `bb gitea` command.
 | `teaProfile`         | auto                | `tea` login to use. Leave empty when one login matches `baseUrl`.                                |
 | `extraRepos`         | empty               | Extra `owner/repo` names, comma or space separated.                                              |
 | `cacheEntryLimitMiB` | 16                  | Largest Gitea response the plugin reads and caches, in MiB. Larger responses fail with an error. |
-| `cacheLimitMiB`      | 64                  | Memory for each display cache (conversations, diffs, lists), in MiB.                             |
+| `cacheLimitMiB`      | 64                  | Memory for each display cache (conversations, diffs, lists, blockers), in MiB.                             |
 
 ```sh
 bb plugin config gitea set baseUrl https://gitea.example.com
@@ -37,6 +37,8 @@ Repositories are the union of matching project `origin` remotes and `extraRepos`
 ## Panel
 
 The Gitea panel has five tabs: **My PRs**, **My Issues**, **Issues**, **Pull requests**, and **Auto-fixers**. Lists filter by repository, state, and text. **My Issues** shows issues assigned to the signed-in account (not pull requests); creating an issue from that tab assigns it to you. Creating from **Issues** does not automatically assign anyone.
+
+**Issues** and **My Issues** have a **Hide blocked** switch in the filter bar, on by default. It hides open issues with open Gitea dependencies, not issues with a particular label. Closed dependencies do not block. Failed or incomplete dependency checks stay visible with an **Unverified** badge; they are not confirmed ready. Turn the switch off to see all matches. The My Issues tab badge still counts all assigned open issues.
 
 An issue or pull request opens on **Conversation**, where you can:
 
@@ -103,7 +105,8 @@ Every panel action has a `bb gitea` command. Read commands accept `--json`.
 
 ```sh
 bb gitea status | repos | refresh
-bb gitea issues|prs|my-prs|my-issues [owner/repo] [--state open|closed|all] [--query text]
+bb gitea issues|my-issues [owner/repo] [--state open|closed|all] [--query text] [--hide-blocked]
+bb gitea prs|my-prs [owner/repo] [--state open|closed|all] [--query text]
 bb gitea show <issue|pr> <owner/repo> <number>             # live read
 bb gitea conversation <issue|pr> <owner/repo> <number> [--refresh]
 bb gitea files <owner/repo> <number> [--refresh]
@@ -134,7 +137,8 @@ Comment ids come from `bb gitea conversation ... --json`. `--old` puts a line co
 ## Behavior and limits
 
 - `conversation`, `files`, and the panel read through a short in-memory cache (about 15 seconds for conversations and lists, 5 minutes for diffs) and refresh in the background. Repository discovery is reused for 30 seconds and label and assignee options for 60 seconds; `bb gitea refresh` clears both. Any write through the plugin clears the affected entries. `show`, `issues`, `prs`, `my-prs`, `my-issues`, auto-fixers, and merges always read Gitea directly.
-- Lists cover at most 50 repositories and 200 items. Comments and reviews stop at 500, files at 500, checks at 100. Results that hit a cap say so.
+- Lists cover at most 50 repositories and 200 items. Hide blocked checks dependencies only for matching open issues within that cap, with at most eight concurrent tea requests. Checks stop once an open blocker is found, or after ten pages; incomplete results are unverified. Blocker checks are cached for 15 seconds without serving stale results; Refresh, writes, and account/settings changes invalidate them. A filtered list may be empty while additional issues exist beyond the cap; narrow the repository or search.
+- Comments and reviews stop at 500, files at 500, checks at 100. Results that hit a cap say so.
 - Checks come from commit statuses.
 - Gitea marks a draft by title prefix. `draft on` adds `WIP: `; `draft off` removes `WIP:` or `[WIP]`.
 - Agent threads started with **send-agent** are told not to write to Gitea unless asked. Auto-fixers are the exception, within their switches.
@@ -149,6 +153,8 @@ bb plugin build .
 ```
 
 Tests use a fake `tea` and never contact Gitea.
+
+Design provenance: the approved filter-bar switch and its discarded alternatives are preserved on the local `prototype/blocked-issues-filter-thr_muruxj7g2u` branch (approval captured in `8661c96`). Only the selected interaction is implemented here.
 
 ## License
 

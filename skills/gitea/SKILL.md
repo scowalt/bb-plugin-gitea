@@ -9,6 +9,7 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea status` checks sign-in and lists repositories.
 - `bb gitea repos` lists repositories from matching project `origin` remotes and `extraRepos`.
 - `bb gitea issues|prs|my-prs|my-issues [owner/repo]` list items. `my-issues` lists issues assigned to the signed-in account (not pull requests); all list commands accept `--state open|closed|all`, `--query text`, and `--json`. `my-prs` lists pull requests by the signed-in login, with each one's Auto-fix, Auto-merge, and auto-fixer state and the automation defaults. New issues created from My Issues are assigned to the signed-in account; ordinary creation is unchanged.
+- `issues` and `my-issues` also accept `--hide-blocked`. It hides open issues with open Gitea dependencies after the repository/state/search filters and 200-item cap. Closed dependencies do not block. Failed, malformed, or capped dependency reads remain visible as `blockerState: "unknown"`; human output marks them `[blockers unknown]`. Filtered responses include `blockedCount`. The panel's filter-bar switch uses this behavior and is on by default; the CLI flag is opt-in.
 - `bb gitea show <issue|pr> <owner/repo> <number>` reads Gitea directly: the item, comments, and for a pull request its files, checks, and reviews. Use it when a decision needs current state.
 - `bb gitea conversation <issue|pr> <owner/repo> <number> [--refresh]` returns what the panel shows, without files. It is cached; `freshness.state` is `fresh`, `refreshing`, or `stale-error`. `--refresh` rereads Gitea. Comment `id`s come from here.
 - `bb gitea files <owner/repo> <number> [--refresh]` returns changed files and diffs for the returned `revision`, with `freshness` and a `stale` flag when the pull request moved during the read. Each file's `diff.kind` is `text` (with `patch`), `empty`, `binary`, `too-large` (over 256 KiB), or `unavailable` with `reason` `missing`, `stale`, `diff-too-large`, or `diff-failed`.
@@ -50,7 +51,7 @@ Turning either on starts an auto-fixer: a hidden BB thread on the host of the re
 
 ## RPCs
 
-Reads: `status`, `refresh`, `listItems`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItem`.
+Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItem`.
 
 Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
 
@@ -61,6 +62,7 @@ Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `r
 - Lists cover at most 50 repositories, ten pages of 50 items per repository, and 200 items total. Errors are reported per repository.
 - Comments and reviews stop at 500, files at 500, checks at 100. A full result is marked as possibly truncated.
 - Panel caches: conversations 15 s fresh and 10 min stale, file sets 5 min fresh and 30 min stale, lists 15 s fresh and 10 min stale. Writes, settings changes, and rejected logins clear them. `show`, list commands, auto-fixers, and merges never use the cache.
+- Issue blocker checks use only dependency endpoints, stop at a known open blocker or ten pages, and share the eight-request tea limit. They are cached for 15 seconds without stale reuse and are invalidated by refreshes, writes, and account/settings changes. A filtered empty list may still have unchecked issues beyond the 200-item cap; narrow the repository or query.
 - Checks come from commit statuses.
 
 ## Settings

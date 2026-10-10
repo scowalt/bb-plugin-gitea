@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add a **Hide blocked** switch to the Issues and My Issues filter bars, plus `--hide-blocked` for their CLI commands. Open Gitea dependencies block issues; closed dependencies do not. Unavailable or incomplete checks remain visible as Unverified. Dependency reads are bounded, cached briefly, and refreshed without loading issue conversations.
 - Add a **Gitea** environment. Its picker lists where to work and the project's Gitea branches, split into your branches and other branches. Pull request branches show a badge colored by state: draft, CI failing, CI running, CI passing, or merged. Picking a branch starts the thread on that branch in a new worktree, or switches an existing worktree to it.
 
 ## 1.0.5 - 2026-10-01

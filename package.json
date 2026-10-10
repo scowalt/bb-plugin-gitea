@@ -46,6 +46,7 @@
     "pull-files-view.ts",
     "auto-fixer.ts",
     "draft-title.ts",
+    "issue-blockers.ts",
     "app.tsx",
     "components",
     "lib",

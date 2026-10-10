@@ -79,6 +79,11 @@ import {
   type LifecycleFact,
   type ResumableSession,
 } from "./auto-fixer.js";
+import {
+  classifyIssueBlockers,
+  issueBlockerStateSchema,
+  type IssueBlockerState,
+} from "./issue-blockers.js";
 const execFileAsync = promisify(execFile);
 
 const itemSchema = z.object({
@@ -94,12 +99,16 @@ const itemSchema = z.object({
   body: z.string(),
   updatedAt: z.string(),
 });
+const listItemSchema = itemSchema.extend({
+  blockerState: issueBlockerStateSchema.optional(),
+});
 const listOutputSchema = z.object({
-  items: z.array(itemSchema),
+  items: z.array(listItemSchema),
   truncated: z.boolean(),
   errors: z.array(z.object({ repo: repositorySchema, message: z.string() })),
+  blockedCount: z.number().int().nonnegative().optional(),
 });
-type ListItem = z.infer<typeof itemSchema>;
+type ListItem = z.infer<typeof listItemSchema>;
 type ItemPage = z.infer<typeof listOutputSchema>;
 const commentSchema = z.object({
   id: z.number().int().positive(),
@@ -240,12 +249,13 @@ export const giteaRpcContract = defineRpcContract({
       kind: z.enum(["issue", "pr"]),
       repo: repositorySchema.optional(),
       state: z.enum(["open", "closed", "all"]).default("open"),
+      hideBlocked: z.boolean().default(false),
       query: z.string().max(200).default(""),
       refresh: z.boolean().default(false),
     }),
     output: listOutputSchema.extend({
       items: z.array(
-        itemSchema.extend({ autoFixer: autoFixerViewSchema.optional() }),
+        listItemSchema.extend({ autoFixer: autoFixerViewSchema.optional() }),
       ),
       account: z.string(),
       freshness: freshnessSchema,
@@ -413,6 +423,7 @@ export const giteaRpcContract = defineRpcContract({
     input: z.object({
       repo: repositorySchema.optional(),
       state: z.enum(["open", "closed", "all"]).default("open"),
+      hideBlocked: z.boolean().default(false),
       query: z.string().max(200).default(""),
       refresh: z.boolean().default(false),
     }),
@@ -497,6 +508,12 @@ const listPolicy: FreshnessPolicy = {
   freshMs: 15_000,
   retainMs: 10 * 60_000,
   retryMs: 30_000,
+};
+// Work availability must not be inferred from retained stale dependencies.
+const blockerPolicy: FreshnessPolicy = {
+  freshMs: 15_000,
+  retainMs: 15_000,
+  retryMs: 0,
 };
 const listTag = "lists";
 const filesPolicy: FreshnessPolicy = {
@@ -597,6 +614,7 @@ export function pullCiStatus(combined: Record<string, unknown>): PullStatus {
 }
 
 class GiteaAccessError extends Error {}
+class GiteaAuthenticationError extends GiteaAccessError {}
 
 function safeLink(base: URL, value: unknown): string {
   if (typeof value !== "string") return "";
@@ -790,8 +808,14 @@ export default async function plugin(bb: BbPluginApi) {
     classify: classifyDisplayFailure,
     onBackgroundSettled: publishDisplay,
   });
-  const displays = [conversations, pullFiles, itemLists, myPullLists, myIssueLists];
-  const displayEntries = [64, 16, 32, 32, 32];
+  const issueBlockers = new DisplayCache<IssueBlockerState>({
+    bounds: cacheBounds(256),
+    now: Date.now,
+    classify: classifyDisplayFailure,
+    onBackgroundSettled: publishDisplay,
+  });
+  const displays = [conversations, pullFiles, itemLists, myPullLists, myIssueLists, issueBlockers];
+  const displayEntries = [64, 16, 32, 32, 32, 256];
   function forgetDisplay() {
     const removed = displays.map((cache) => cache.clear());
     if (removed.includes(true)) publishDisplay(null);
@@ -805,6 +829,7 @@ export default async function plugin(bb: BbPluginApi) {
     itemLists.invalidate(listTag);
     myPullLists.invalidate(listTag);
     myIssueLists.invalidate(listTag);
+    issueBlockers.invalidate(listTag);
     publishDisplay(listTag);
   }
   bb.onDispose(() => {
@@ -1021,7 +1046,7 @@ export default async function plugin(bb: BbPluginApi) {
         case "missing-login": {
           loginLookup = null;
           forgetDisplay();
-          throw new GiteaAccessError(
+          throw new GiteaAuthenticationError(
             `tea login profile "${login}" is no longer available. ${teaHint}`,
           );
         }
@@ -1038,7 +1063,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error("tea did not report the Gitea response status.");
     if (status === 401) {
       forgetDisplay();
-      throw new GiteaAccessError(
+      throw new GiteaAuthenticationError(
         `Gitea rejected tea login profile "${login}". Sign in again with \`tea login add\`.`,
       );
     }
@@ -1269,6 +1294,32 @@ export default async function plugin(bb: BbPluginApi) {
         };
       }),
     };
+  }
+
+  async function readIssueBlockerState(
+    repo: string,
+    number: number,
+    signal: AbortSignal,
+  ): Promise<IssueBlockerState> {
+    try {
+      let uncertain = false;
+      for (let page = 1; page <= maxPages; page += 1) {
+        const query = new URLSearchParams({ limit: String(pageSize), page: String(page) });
+        const dependencies = await api(repoPath(repo, `issues/${number}/dependencies?${query}`), { signal });
+        if (!Array.isArray(dependencies))
+          throw new Error("Gitea returned an invalid dependency response.");
+        const state = classifyIssueBlockers(dependencies, false);
+        if (state === "blocked") return state;
+        uncertain ||= state === "unknown";
+        if (dependencies.length < pageSize) return uncertain ? "unknown" : "unblocked";
+      }
+      return "unknown";
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (error instanceof GiteaAuthenticationError) throw error;
+      bb.log.warn(`Could not check blockers for ${repo}#${number}: ${error instanceof Error ? error.message : "unknown error"}`);
+      return "unknown";
+    }
   }
 
   async function readIssueRelations(repo: string, number: number, signal: AbortSignal) {
@@ -1546,6 +1597,31 @@ export default async function plugin(bb: BbPluginApi) {
   ) {
     return pickItems(await fetchItems(kind, repo, state, signal), query);
   }
+  async function hideBlockedIssues(
+    page: ItemPage,
+    account: string,
+    refresh: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<ItemPage> {
+    if (refresh) issueBlockers.invalidate(listTag);
+    signal?.throwIfAborted();
+    // pickItems has already applied search and the 200-item cap. Tea's shared
+    // queue bounds concurrent dependency reads; no comments or reverse links load.
+    const checked = await Promise.all(page.items.map(async (item) => {
+      if (item.state !== "open") return item;
+      const key = JSON.stringify([account, repoKey(item.repo), item.number]);
+      const { value } = await issueBlockers.read(
+        key,
+        listTag,
+        (loadSignal) => readIssueBlockerState(item.repo, item.number, loadSignal),
+        { policy: blockerPolicy, signal },
+      );
+      return { ...item, blockerState: value };
+    }));
+    const items = checked.filter((item) => item.blockerState !== "blocked");
+    return { ...page, items, blockedCount: checked.length - items.length };
+  }
+
   async function fetchMyIssues(
     repo: string | undefined,
     state: "open" | "closed" | "all",
@@ -2677,7 +2753,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     },
     listItems: async (
-      { kind, repo, state, query, refresh },
+      { kind, repo, state, query, refresh, hideBlocked },
       { experimental_signal: signal }: RpcContext = {},
     ) => {
       const list = await readList(
@@ -2689,7 +2765,10 @@ export default async function plugin(bb: BbPluginApi) {
         (loadSignal) => fetchItems(kind, repo, state, loadSignal),
         signal,
       );
-      const page = pickItems(list.value, query);
+      const picked = pickItems(list.value, query);
+      const page = kind === "issue" && hideBlocked
+        ? await hideBlockedIssues(picked, list.account, refresh, signal)
+        : picked;
       return {
         ...page,
         items: kind === "pr" ? await withAutoFixers(page.items) : page.items,
@@ -3053,7 +3132,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { repos: (await repos()).length, items: 0 };
     },
     listMyIssues: async (
-      { repo, state, query, refresh },
+      { repo, state, query, refresh, hideBlocked },
       { experimental_signal: signal }: RpcContext = {},
     ) => {
       const mine = await readList(
@@ -3065,8 +3144,12 @@ export default async function plugin(bb: BbPluginApi) {
         (loadSignal) => fetchMyIssues(repo, state, loadSignal),
         signal,
       );
+      const picked = pickItems(mine.value.page, query);
+      const page = hideBlocked
+        ? await hideBlockedIssues(picked, mine.account, refresh, signal)
+        : picked;
       return {
-        ...pickItems(mine.value.page, query),
+        ...page,
         account: mine.account,
         freshness: mine.freshness,
         login: mine.value.login,
@@ -3215,7 +3298,7 @@ export default async function plugin(bb: BbPluginApi) {
         name: "issues",
         summary: "List repository issues",
         usage:
-          "bb gitea issues [owner/repo] [--state open|closed|all] [--query text] [--json]",
+          "bb gitea issues [owner/repo] [--state open|closed|all] [--query text] [--hide-blocked] [--json]",
       },
       {
         name: "prs",
@@ -3317,7 +3400,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "my-issues",
         summary: "List issues assigned to your Gitea account",
-        usage: "bb gitea my-issues [owner/repo] [--state open|closed|all] [--query text] [--json]",
+        usage: "bb gitea my-issues [owner/repo] [--state open|closed|all] [--query text] [--hide-blocked] [--json]",
       },
       {
         name: "my-prs",
@@ -3405,9 +3488,10 @@ export default async function plugin(bb: BbPluginApi) {
         args.splice(index, 2);
       const refresh = args.includes("--refresh");
       const old = args.includes("--old");
+      const hideBlocked = args.includes("--hide-blocked");
       const positional = args.filter(
         (value) =>
-          value !== "--json" && value !== "--refresh" && value !== "--old",
+          value !== "--json" && value !== "--refresh" && value !== "--old" && value !== "--hide-blocked",
       );
       const [command, ...values] = positional;
       const succeed = (value: unknown, human: string) => ({
@@ -3415,6 +3499,8 @@ export default async function plugin(bb: BbPluginApi) {
         stdout: json ? JSON.stringify(value) : human,
       });
       try {
+        if (hideBlocked && command !== "issues" && command !== "my-issues")
+          throw new Error("--hide-blocked is supported only by issues and my-issues.");
         if (command === "status") {
           const value = await handlers.status(null);
           return succeed(
@@ -3433,6 +3519,7 @@ export default async function plugin(bb: BbPluginApi) {
           const input = giteaRpcContract.listItems.input.parse({
             kind: command === "prs" ? "pr" : "issue",
             ...(values[0] ? { repo: values[0] } : {}),
+            hideBlocked,
             state,
             query,
             refresh: true,
@@ -3440,7 +3527,7 @@ export default async function plugin(bb: BbPluginApi) {
           const value = await handlers.listItems(input);
           return succeed(
             value,
-            `${value.items.map((entry) => `${entry.repo}#${entry.number} ${entry.state} ${entry.title}`).join("\n")}${value.truncated ? "\nResults are capped; narrow the repository or query." : ""}${value.errors.map((entry) => `\n${entry.repo}: ${entry.message}`).join("")}`,
+            `${value.items.map((entry) => `${entry.repo}#${entry.number} ${entry.state} ${entry.title}${entry.blockerState === "unknown" ? " [blockers unknown]" : ""}`).join("\n")}${hideBlocked ? `\n${value.blockedCount ?? 0} blocked hidden` : ""}${value.truncated ? "\nResults are capped; narrow the repository or query." : ""}${value.errors.map((entry) => `\n${entry.repo}: ${entry.message}`).join("")}`,
           );
         }
         if (command === "show") {
@@ -3636,13 +3723,14 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "my-issues") {
           const input = giteaRpcContract.listMyIssues.input.parse({
             ...(values[0] ? { repo: values[0] } : {}),
+            hideBlocked,
             state,
             query,
             refresh: true,
           });
           const value = await handlers.listMyIssues(input);
           return succeed(value,
-            `${value.items.map((entry) => `${entry.repo}#${entry.number} ${entry.state} ${entry.title}`).join("\n") || "No issues assigned to you."}${value.truncated ? "\nResults are capped; narrow the repository or query." : ""}${value.errors.map((entry) => `\n${entry.repo}: ${entry.message}`).join("")}`,
+            `${value.items.map((entry) => `${entry.repo}#${entry.number} ${entry.state} ${entry.title}${entry.blockerState === "unknown" ? " [blockers unknown]" : ""}`).join("\n") || (value.blockedCount ? "All loaded matching issues are blocked." : "No issues assigned to you.")}${hideBlocked ? `\n${value.blockedCount ?? 0} blocked hidden` : ""}${value.truncated ? "\nResults are capped; narrow the repository or query." : ""}${value.errors.map((entry) => `\n${entry.repo}: ${entry.message}`).join("")}`,
           );
         }
         if (command === "my-prs") {

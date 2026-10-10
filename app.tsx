@@ -93,6 +93,7 @@ type ListFilters = {
   state: StateFilter;
   repo: string;
   query: string;
+  hideBlocked?: boolean;
 };
 type ItemList = {
   account: string;
@@ -100,6 +101,7 @@ type ItemList = {
   truncated: boolean;
   errors: Array<{ repo: string; message: string }>;
   freshness: Freshness;
+  blockedCount: number;
 };
 
 type Scope = { state: "unverified" } | { state: "verified"; account: string };
@@ -267,7 +269,7 @@ let displayMemory: DisplayMemory = {
 const memoryListeners = new Set<() => void>();
 let scopeWatchers = 0;
 const panelMemory: { filters: ListFilters; preferences: Preferences | null } = {
-  filters: { view: "my-prs", state: "open", repo: "all", query: "" },
+  filters: { view: "my-prs", state: "open", repo: "all", query: "", hideBlocked: true },
   preferences: null,
 };
 
@@ -359,8 +361,8 @@ const openMyIssues: ListFilters = {
   query: "",
 };
 
-function listKey({ view, state, repo, query }: ListFilters) {
-  return JSON.stringify([view, repo, state, query]);
+function listKey({ view, state, repo, query, hideBlocked = false }: ListFilters) {
+  return JSON.stringify([view, repo, state, query, (view === "issues" || view === "my-issues") && hideBlocked]);
 }
 
 function useIsDarkTheme() {
@@ -844,25 +846,25 @@ const loading = { state: "loading" } as const;
 
 async function readItemList(
   rpc: PluginRpcClient<typeof giteaRpcContract>,
-  { view, state, repo, query }: ListFilters,
+  { view, state, repo, query, hideBlocked = false }: ListFilters,
   refresh: boolean,
 ): Promise<ItemList> {
   const input = { state, query, refresh, ...(repo === "all" ? {} : { repo }) };
   switch (view) {
     case "my-issues": {
-      const { account, items, truncated, errors, freshness } = await rpc.call("listMyIssues", input);
-      return { account, items, truncated, errors, freshness };
+      const { account, items, truncated, errors, freshness, blockedCount = 0 } = await rpc.call("listMyIssues", { ...input, hideBlocked });
+      return { account, items, truncated, errors, freshness, blockedCount };
     }
     case "my-prs": {
       const { account, items, truncated, errors, freshness } = await rpc.call("listMyPullRequests", input);
-      return { account, items, truncated, errors, freshness };
+      return { account, items, truncated, errors, freshness, blockedCount: 0 };
     }
     case "issues":
     case "pulls": {
-      const { account, items, truncated, errors, freshness } = await rpc.call(
-        "listItems", { kind: view === "issues" ? "issue" : "pr", ...input },
+      const { account, items, truncated, errors, freshness, blockedCount = 0 } = await rpc.call(
+        "listItems", { kind: view === "issues" ? "issue" : "pr", ...input, hideBlocked: view === "issues" && hideBlocked },
       );
-      return { account, items, truncated, errors, freshness };
+      return { account, items, truncated, errors, freshness, blockedCount };
     }
   }
 }
@@ -876,7 +878,7 @@ function useItemList(
 ) {
   const rpc = useRpc<typeof giteaRpcContract>();
   const key = enabled ? listKey(filters) : null;
-  const { view, state, repo, query } = filters;
+  const { view, state, repo, query, hideBlocked = false } = filters;
   const { epoch } = memory;
   const [failure, setFailure] = useState<{
     key: string;
@@ -894,7 +896,7 @@ function useItemList(
       try {
         const list = await readItemList(
           rpc,
-          { view, state, repo, query },
+          { view, state, repo, query, hideBlocked },
           refresh,
         );
         if (current !== run.current) return;
@@ -912,7 +914,7 @@ function useItemList(
       }
       setPending(null);
     },
-    [key, rpc, view, state, repo, query, epoch, onFailure],
+    [key, rpc, view, state, repo, query, hideBlocked, epoch, onFailure],
   );
   useEffect(() => {
     void load(false);
@@ -1800,10 +1802,12 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
   const [state, setState] = useState(panelMemory.filters.state);
   const [repo, setRepo] = useState(panelMemory.filters.repo);
   const [query, setQuery] = useState(panelMemory.filters.query);
+  const [hideBlocked, setHideBlocked] = useState(panelMemory.filters.hideBlocked ?? true);
+  const issueList = view === "issues" || view === "my-issues";
   const searchQuery = useDebouncedValue(query, 250);
   useEffect(() => {
-    panelMemory.filters = { view: listView, state, repo, query: searchQuery };
-  }, [view, state, repo, searchQuery]);
+    panelMemory.filters = { view: listView, state, repo, query: searchQuery, hideBlocked };
+  }, [view, state, repo, searchQuery, hideBlocked]);
   const settings = useScopeWatch();
   const memory = useDisplayMemory();
   const status = trustedStatus(memory, settings);
@@ -1818,7 +1822,7 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
   }, [rpc]);
   const verify = useCallback(() => void loadStatus(), [loadStatus]);
   const itemList = useItemList(
-    { view: listView, state, repo, query: searchQuery },
+    { view: listView, state, repo, query: searchQuery, hideBlocked },
     memory,
     settings,
     verify,
@@ -2025,6 +2029,7 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
 
   const shownList = list.state === "ready" ? list.value : null;
   const visibleItems = shownList?.items ?? [];
+  const unverifiedCount = visibleItems.filter((item) => item.blockerState === "unknown").length;
   const count =
     openMine.list.state === "ready"
       ? `${openMine.list.value.items.length}${openMine.list.value.truncated ? "+" : ""}`
@@ -2578,6 +2583,15 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                     <SelectItem value="all">All states</SelectItem>
                   </SelectContent>
                 </Select>
+                {issueList && (
+                  <label className="flex h-9 shrink-0 cursor-pointer items-center gap-2 whitespace-nowrap text-xs" title="Hide issues with open Gitea dependencies. Unknown dependency checks stay visible.">
+                    <input type="checkbox" role="switch" aria-label="Hide blocked issues" checked={hideBlocked} onChange={(event) => setHideBlocked(event.target.checked)} className="peer sr-only" />
+                    <span aria-hidden="true" className="flex h-4 w-7 items-center rounded-full border border-border bg-secondary p-0.5 peer-checked:bg-foreground peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2">
+                      <span className={`size-2.5 rounded-full transition-transform ${hideBlocked ? "translate-x-3 bg-background" : "bg-foreground"}`} />
+                    </span>
+                    <span>Hide blocked</span>
+                  </label>
+                )}
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
@@ -2599,6 +2613,13 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                   </span>
                 )}
               </div>
+              {issueList && hideBlocked && shownList && (
+                <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <span>{shownList.blockedCount} blocked hidden</span>
+                  {unverifiedCount > 0 && <span>{unverifiedCount} unverified — kept visible; blockers unavailable or incomplete.</span>}
+                  {shownList.truncated && <span>Results are capped at 200 items; narrow the repository or search.</span>}
+                </div>
+              )}
               <div className="overflow-hidden rounded-lg border border-border bg-card">
                 <div className="divide-y divide-border">
                   {list.state === "loading" ? (
@@ -2651,6 +2672,9 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                             </span>
                           </span>
                           <span className="flex flex-wrap items-center gap-1">
+                            {issueList && hideBlocked && item.blockerState === "unknown" && (
+                              <Badge variant="outline" className="font-normal text-muted-foreground">Unverified</Badge>
+                            )}
                             {item.labels.slice(0, 3).map((label) => (
                               <Badge
                                 key={label}
@@ -2678,7 +2702,9 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                     <div className="p-8 text-center text-muted-foreground">
                       {(view === "my-prs" || view === "my-issues") && status?.state !== "connected"
                         ? "Install tea and sign in with a matching Gitea login profile to see your pull requests."
-                        : view === "my-prs"
+                        : issueList && hideBlocked && (shownList?.blockedCount ?? 0) > 0
+                          ? "All loaded matching issues are blocked. Turn off Hide blocked to see them."
+                          : view === "my-prs"
                           ? "No pull requests authored by you in tracked repositories."
                           : view === "my-issues"
                             ? "No issues assigned to you in tracked repositories."

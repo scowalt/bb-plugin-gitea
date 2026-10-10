@@ -187,6 +187,155 @@ function gitSource(remote: string) {
   return path;
 }
 
+it("hides only proven blocked issues and keeps closed, failed, and malformed dependency reads visible", async () => {
+  const { host, calls } = await start(({ endpoint }) => {
+    const path = endpoint.split("?")[0]!;
+    if (path.endsWith("/issues")) return { json: [
+      { ...issue(1), labels: [{ name: "blocked" }] }, issue(2), issue(3), issue(4), issue(5),
+      { ...issue(6), state: "closed" },
+    ] };
+    if (path.endsWith("/issues/2/dependencies")) return { json: [issue(99)] };
+    if (path.endsWith("/issues/3/dependencies")) return { json: [{ ...issue(99), state: "closed" }] };
+    if (path.endsWith("/issues/4/dependencies")) return { status: 403 };
+    if (path.endsWith("/issues/5/dependencies")) return { json: [{ state: "unexpected" }] };
+    return { json: [] };
+  });
+  const result = await listItems(host, { hideBlocked: true, state: "all" });
+  expect(result.blockedCount).toBe(1);
+  expect(result.items.map(({ number, blockerState }) => [number, blockerState])).toEqual([
+    [1, "unblocked"], [3, "unblocked"], [4, "unknown"], [5, "unknown"], [6, undefined],
+  ]);
+  expect(calls.filter(({ endpoint }) => endpoint.includes("/dependencies"))).toHaveLength(5);
+  expect(calls.some(({ endpoint }) => /\/issues\/6\/dependencies|\/comments|\/blocks\?/.test(endpoint))).toBe(false);
+  const warm = calls.length;
+  expect((await listItems(host, { state: "all" })).items).toHaveLength(6);
+  expect(calls).toHaveLength(warm);
+});
+
+it("stops blocker pagination at an open dependency and leaves capped closed-only reads unknown", async () => {
+  const closed = Array.from({ length: 50 }, (_, index) => ({ ...issue(index + 10), state: "closed" }));
+  const { host, calls } = await start(({ endpoint }) => {
+    const path = endpoint.split("?")[0]!;
+    if (path.endsWith("/issues")) return { json: [issue(1), issue(2)] };
+    if (path.endsWith("/issues/1/dependencies") && page(endpoint) === 2) return { json: [issue(99)] };
+    return { json: closed };
+  });
+  const result = await listItems(host, { hideBlocked: true });
+  expect(result).toMatchObject({ blockedCount: 1, items: [{ number: 2, blockerState: "unknown" }] });
+  expect(calls.filter(({ endpoint }) => endpoint.includes("/issues/1/dependencies"))).toHaveLength(2);
+  expect(calls.filter(({ endpoint }) => endpoint.includes("/issues/2/dependencies"))).toHaveLength(10);
+});
+
+it("caches blocker checks across searches and invalidates them on refresh, mutations, and account changes", async () => {
+  let blocked = true;
+  const { host, calls } = await start(({ endpoint, login, method }) => {
+    const path = endpoint.split("?")[0]!;
+    if (method !== "GET") return { json: {} };
+    if (path.endsWith("/issues")) return { json: [issue(1, "First"), issue(2, "Second")] };
+    if (path.endsWith("/issues/1/dependencies")) return { json: blocked || login === "ops" ? [issue(99)] : [] };
+    return { json: [] };
+  }, {
+    profiles: [...defaultProfiles, { name: "ops", url: "https://gitea.example/prefix", user: "ops" }],
+    settings: { teaProfile: "work" },
+  });
+  expect((await listItems(host, { hideBlocked: true })).items.map(item => item.number)).toEqual([2]);
+  const warm = calls.length;
+  await listItems(host, { hideBlocked: true, query: "Second" });
+  expect(calls).toHaveLength(warm);
+  blocked = false;
+  expect((await listItems(host, { hideBlocked: true, refresh: true })).items).toHaveLength(2);
+  expect(calls.slice(warm).filter(({ endpoint }) => endpoint.includes("/dependencies"))).toHaveLength(2);
+  blocked = true;
+  await rpc(host, "setState", { repo: "acme/widgets", number: 99, state: "open" });
+  expect((await listItems(host, { hideBlocked: true })).items.map(item => item.number)).toEqual([2]);
+  const beforeSwitch = calls.length;
+  await host.harness.behavior.setSettings({ teaProfile: "ops" });
+  expect((await listItems(host, { hideBlocked: true })).items.map(item => item.number)).toEqual([2]);
+  expect(calls.slice(beforeSwitch).every(call => call.login === "ops")).toBe(true);
+  expect(calls.slice(beforeSwitch).filter(({ endpoint }) => endpoint.includes("/dependencies"))).toHaveLength(2);
+});
+
+it("does not use a stale unblocked result when a later blocker read fails", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  cleanups.push(() => { vi.useRealTimers(); });
+  let failing = false;
+  const { host, calls } = await start(({ endpoint }) => {
+    if (endpoint.split("?")[0]!.endsWith("/issues")) return { json: [issue(1)] };
+    return failing ? { status: 500 } : { json: [] };
+  });
+  expect((await listItems(host, { hideBlocked: true })).items[0]?.blockerState).toBe("unblocked");
+  failing = true;
+  vi.setSystemTime(Date.now() + 16_000);
+  expect((await listItems(host, { hideBlocked: true })).items[0]?.blockerState).toBe("unknown");
+  expect(calls.filter(({ endpoint }) => endpoint.includes("/dependencies"))).toHaveLength(2);
+});
+
+it("rejects cached issue lists when the blocker read discovers a revoked login", async () => {
+  let rejected = false;
+  const { host } = await start(({ endpoint }) => {
+    if (rejected) return { status: 401 };
+    if (endpoint.split("?")[0]!.endsWith("/issues")) return { json: [issue(1)] };
+    return { json: [] };
+  });
+  await listItems(host, {});
+  rejected = true;
+  await expect(listItems(host, { hideBlocked: true })).rejects.toThrow("rejected tea login");
+  await expect(listItems(host, {})).rejects.toThrow("rejected tea login");
+});
+
+it("supports assigned-issue blocker filtering and the CLI flag without checking unassigned issues", async () => {
+  const { host, calls } = await start(({ endpoint }) => {
+    const path = endpoint.split("?")[0]!;
+    if (path.endsWith("/user")) return { json: { login: "dev" } };
+    if (path.endsWith("/issues")) return { json: [
+      { ...issue(1), assignees: [{ login: "dev" }] },
+      { ...issue(2), assignees: [{ login: "dev" }] }, issue(3),
+    ] };
+    if (path.endsWith("/issues/1/dependencies")) return { json: [issue(99)] };
+    return { status: 500 };
+  });
+  const result = giteaRpcContract.listMyIssues.output.parse(await rpc(host, "listMyIssues", { hideBlocked: true }));
+  expect(result).toMatchObject({ blockedCount: 1, login: "dev", items: [{ number: 2, blockerState: "unknown" }] });
+  expect(calls.some(({ endpoint }) => endpoint.includes("/issues/3/dependencies"))).toBe(false);
+  const cli = await host.harness.behavior.runCli(["my-issues", "acme/widgets", "--hide-blocked", "--query", "Issue"]);
+  expect(cli.exitCode).toBe(0);
+  expect(cli.stdout).toContain("[blockers unknown]");
+  expect(cli.stdout).toContain("1 blocked hidden");
+  const json = await host.harness.behavior.runCli(["issues", "acme/widgets", "--hide-blocked", "--json"]);
+  expect(json.exitCode).toBe(0);
+  expect(JSON.parse(json.stdout)).toMatchObject({ blockedCount: 1 });
+  expect(await host.harness.behavior.runCli(["prs", "--hide-blocked"])).toMatchObject({ exitCode: 1 });
+});
+
+it("bounds blocker checks to matching open issues within the existing 200-item cap and tea queue", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  cleanups.push(() => { vi.useRealTimers(); });
+  let active = 0;
+  let peak = 0;
+  const { host, calls } = await start(async ({ endpoint }) => {
+    const path = endpoint.split("?")[0]!;
+    if (path.endsWith("/issues")) {
+      const start = (page(endpoint) - 1) * 50;
+      return { json: Array.from({ length: Math.min(50, 201 - start) }, (_, index) => issue(start + index + 1)) };
+    }
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active -= 1;
+    return { json: [issue(999)] };
+  });
+  const result = await listItems(host, { hideBlocked: true });
+  expect(result).toMatchObject({ items: [], blockedCount: 200, truncated: true });
+  expect(calls.filter(({ endpoint }) => endpoint.includes("/dependencies"))).toHaveLength(200);
+  expect(calls.some(({ endpoint }) => endpoint.includes("/issues/201/dependencies"))).toBe(false);
+  expect(peak).toBeLessThanOrEqual(8);
+  const beforeSearch = calls.length;
+  await listItems(host, { hideBlocked: true, query: "Issue 201" });
+  expect(calls.slice(beforeSearch).map(call => call.endpoint)).toEqual([
+    "/api/v1/repos/acme/widgets/issues/201/dependencies?limit=50&page=1",
+  ]);
+}, 40_000);
+
 it("discovers only matching Gitea HTTPS and SSH remotes under the configured path prefix", async () => {
   const paths = [
     gitSource("https://github.com/acme/ignored.git"),

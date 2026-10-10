@@ -33,6 +33,7 @@
     "pull-files-view.ts",
     "*.test.ts",
     "app.tsx",
+    "app-issue-filter.test.tsx",
     "vitest.config.ts"
   ]
 }
