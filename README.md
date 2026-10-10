@@ -11,11 +11,11 @@ Browse and act on Gitea issues and pull requests from BB, and let a BB agent fix
 ## Install
 
 ```sh
-bb plugin install https://github.com/Nick-Motion/bb-plugin-gitea
+bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.0.6'
 bb plugin update gitea --yes   # later, to update
 ```
 
-The plugin id is `gitea` and it adds the `bb gitea` command.
+The plugin id is `gitea` and it adds the `bb gitea` command. This fork's releases are published at [scowalt/bb-plugin-gitea](https://github.com/scowalt/bb-plugin-gitea/releases); the original upstream is [Nick-Motion/bb-plugin-gitea](https://github.com/Nick-Motion/bb-plugin-gitea).
 
 ## Configure
 

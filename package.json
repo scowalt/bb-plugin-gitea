@@ -1,11 +1,11 @@
 {
   "name": "bb-plugin-gitea",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Gitea issues and pull requests inside BB, backed by the Gitea tea CLI.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nick-Motion/bb-plugin-gitea.git"
+    "url": "git+https://github.com/scowalt/bb-plugin-gitea.git"
   },
   "type": "module",
   "engines": {

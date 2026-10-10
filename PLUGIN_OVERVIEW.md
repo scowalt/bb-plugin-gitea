@@ -2,7 +2,7 @@ Gitea issues and pull requests inside BB. You can browse, comment, review, and l
 
 ## What you get
 
-- Issue and pull request lists filtered by repository, state, and text, with My PRs and assigned-to-me My Issues views.
+- Issue and pull request lists filtered by repository, state, and text, with My PRs and assigned-to-me My Issues views. Hide blocked keeps open issues with open Gitea dependencies out of the Issues and My Issues lists; unavailable or incomplete checks stay visible as Unverified.
 - A conversation view where you comment, edit or delete your own comments, pick labels and assignees, close or reopen, review, and see checks.
 - A Files changed view with a file tree, unified or split diffs, and inline line comments.
 - A **Gitea** environment for new threads. It lists the project's Gitea branches, yours first, with pull request badges that show CI and merge state. The thread starts on the picked branch in a new or existing worktree.
@@ -20,4 +20,6 @@ Browsing and commenting use no agent time. Auto-fix, Auto-merge, and `bb gitea s
 
 Run `bb gitea` for the full list. Examples: `bb gitea my-prs`, `bb gitea show pr owner/repo 12`, `bb gitea auto-fix owner/repo 12 on`.
 
-Source and full docs: https://github.com/Nick-Motion/bb-plugin-gitea
+Source and full docs: https://github.com/scowalt/bb-plugin-gitea
+
+Original upstream: https://github.com/Nick-Motion/bb-plugin-gitea
