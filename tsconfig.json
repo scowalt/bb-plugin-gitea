@@ -34,6 +34,7 @@
     "*.test.ts",
     "app.tsx",
     "app-issue-filter.test.tsx",
+    "app-agent-links.test.tsx",
     "vitest.config.ts"
   ]
 }

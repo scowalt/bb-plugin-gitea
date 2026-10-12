@@ -4,6 +4,7 @@ Gitea issues and pull requests inside BB. You can browse, comment, review, and l
 
 - Issue and pull request lists filtered by repository, state, and text, with My PRs and assigned-to-me My Issues views. Hide blocked keeps open issues with open Gitea dependencies out of the Issues and My Issues lists; unavailable or incomplete checks stay visible as Unverified.
 - A conversation view where you comment, edit or delete your own comments, pick labels and assignees, close or reopen, review, and see checks.
+- Direct **Start** / **Review** agent actions with clickable **⚡ agent** badges in lists and details. Multiple manual sends keep their linked thread history; badges indicate a past send, not a currently running agent.
 - A Files changed view with a file tree, unified or split diffs, and inline line comments.
 - A **Gitea** environment for new threads. It lists the project's Gitea branches, yours first, with pull request badges that show CI and merge state. The thread starts on the picked branch in a new or existing worktree.
 - Auto-fix (fix CI failures and address review feedback) and Auto-merge (merge when Gitea allows) controls on My PRs and Pull requests. Each starts a hidden BB agent thread. Both are off by default.
@@ -14,7 +15,7 @@ Install the `tea` CLI 0.15.1 or newer and sign in with `tea login add`. BB store
 
 ## Costs and permissions
 
-Browsing and commenting use no agent time. Auto-fix, Auto-merge, and `bb gitea send-agent` start BB agent threads, which use your configured model. Auto-fixers act on Gitea with your `tea` login's permissions. Gitea has no native auto-merge, so the merge rules are enforced by the agent's instructions.
+Browsing and commenting use no agent time. The panel's agent actions, Auto-fix, Auto-merge, and `bb gitea send-agent` start BB agent threads, which use your configured model. Auto-fixers act on Gitea with your `tea` login's permissions. Gitea has no native auto-merge, so the merge rules are enforced by the agent's instructions.
 
 ## Commands
 

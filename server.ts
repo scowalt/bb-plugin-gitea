@@ -222,6 +222,12 @@ const pullRefSchema = z.object({
   number: z.number().int().positive(),
 });
 const threadIdSchema = z.object({ threadId: z.string().min(1) });
+const threadLinkSchema = pullRefSchema.extend({
+  kind: z.enum(["issue", "pr"]),
+  threadId: z.string().min(1),
+  createdAt: z.string(),
+}).strict();
+type ThreadLink = z.infer<typeof threadLinkSchema>;
 
 export const giteaRpcContract = defineRpcContract({
   status: {
@@ -377,6 +383,13 @@ export const giteaRpcContract = defineRpcContract({
       kind: z.enum(["issue", "pr"]),
     }),
     output: z.object({ threadId: z.string().min(1) }),
+  },
+  listLinks: {
+    input: z.null(),
+    output: z.object({
+      account: z.string(),
+      links: z.record(z.string(), z.array(threadLinkSchema)),
+    }),
   },
   draftAgent: {
     input: z.object({
@@ -1702,6 +1715,52 @@ export default async function plugin(bb: BbPluginApi) {
     });
     return match ? bb.storage.kv.get<string>(match) : undefined;
   }
+  // Unlike GitHub, Gitea can switch servers/accounts. Keep each link index scoped
+  // to the same identity as the displayed lists rather than sharing repo names.
+  const linkPrefix = (account: string) => `link:${account}:`;
+  const linkItemKey = (link: Pick<ThreadLink, "kind" | "repo" | "number">) =>
+    `${link.kind}:${itemKey(link.repo, link.number)}`;
+
+  async function readLinks(key: string): Promise<ThreadLink[]> {
+    const stored = await bb.storage.kv.get<unknown>(key);
+    if (!Array.isArray(stored)) return [];
+    return stored.flatMap((value) => {
+      const parsed = threadLinkSchema.safeParse(value);
+      return parsed.success ? [parsed.data] : [];
+    });
+  }
+
+  async function addLink(account: string, link: ThreadLink): Promise<void> {
+    const key = `${linkPrefix(account)}${linkItemKey(link)}`;
+    await serialized(link.repo, link.number, async () => {
+      const existing = (await readLinks(key)).filter(
+        (entry) => linkItemKey(entry) === linkItemKey(link),
+      );
+      await bb.storage.kv.set(key, [...existing, link]);
+      // Preserve the existing latest-thread and thread-side contracts.
+      await bb.storage.kv.set(threadKey(link.repo, link.number), link.threadId);
+      await bb.storage.kv.set(`thread-link:${link.threadId}`, {
+        repo: link.repo,
+        number: link.number,
+        kind: link.kind,
+      });
+    });
+    bb.realtime.publish("links-changed", { key });
+  }
+
+  async function listAllLinks() {
+    const account = await displayAccount();
+    const prefix = linkPrefix(account);
+    const links: Record<string, ThreadLink[]> = {};
+    for (const key of await bb.storage.kv.list(prefix)) {
+      const entries = (await readLinks(key)).filter(
+        (entry) => `${prefix}${linkItemKey(entry)}` === key,
+      );
+      if (entries.length) links[key.slice(prefix.length)] = entries;
+    }
+    return { account, links };
+  }
+
   const autoFixerThreadKey = (threadId: string) =>
     `auto-fixer-thread:${threadId}`;
   const autoFixerRefSchema = z.object({
@@ -3069,6 +3128,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(
           `No BB project is associated with ${repo}. Attach a project checkout or use another repository.`,
         );
+      const account = await displayAccount();
       const { item, context } = await agentPrompt(repo, number, kind, signal);
       const ref = `${repo}#${number}`;
       const execution = await agentExecution();
@@ -3090,14 +3150,16 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
       });
-      await bb.storage.kv.set(threadKey(repo, number), thread.id);
-      await bb.storage.kv.set(`thread-link:${thread.id}`, {
+      await addLink(account, {
         repo,
         number,
         kind,
+        threadId: thread.id,
+        createdAt: now(),
       });
       return { threadId: thread.id };
     },
+    listLinks: listAllLinks,
     draftAgent: async (
       { repo, number, kind },
       { experimental_signal: signal }: RpcContext = {},

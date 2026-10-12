@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.0.7 - 2026-10-12
+
+### Added
+
+- Add GitHub-style clickable **⚡ agent** badges to issue/PR lists and details, plus an **Agents** sidebar. Manual sends retain multiple thread links and refresh badges across clients; history is scoped to the Gitea account and persists across plugin reloads.
+
+### Changed
+
+- Replace **Draft with agent** with direct **Send agent** / **Review with agent**, and add **Start** / **Review** actions to list rows. Auto-fixer indicators remain separate.
+
+### Tests
+
+- Cover append-only link history, concurrent sends, failure handling, account isolation, reverse links, legacy detail links, realtime badge refresh, and direct-send navigation.
 
 ## 1.0.6 - 2026-10-10
 

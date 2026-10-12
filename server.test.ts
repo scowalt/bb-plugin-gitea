@@ -3180,6 +3180,114 @@ it("starts send-agent threads with the chosen model or the project default", asy
   });
 });
 
+async function agentLinks(host: Host) {
+  return giteaRpcContract.listLinks.output.parse(await rpc(host, "listLinks"));
+}
+
+async function sendManualAgent(host: Host, input: { repo: string; number: number; kind: "issue" | "pr" } = { ...pr42, kind: "pr" }) {
+  return giteaRpcContract.sendAgent.output.parse(await rpc(host, "sendAgent", input));
+}
+
+it("records every successful manual send by item and keeps the reverse lookup", async () => {
+  const { host, calls } = await startAutoFixers();
+  const first = await sendManualAgent(host);
+  const second = await sendManualAgent(host, { repo: "Acme/Widgets", number: 42, kind: "pr" });
+  const issueThread = await sendManualAgent(host, { ...pr42, kind: "issue" });
+  const { account, links } = await agentLinks(host);
+  expect(account).toBe('["https://gitea.example/prefix/","work","dev"]');
+  expect(links["pr:acme/widgets#42"]).toEqual([
+    { ...pr42, kind: "pr", threadId: first.threadId, createdAt: expect.any(String) },
+    { repo: "Acme/Widgets", number: 42, kind: "pr", threadId: second.threadId, createdAt: expect.any(String) },
+  ]);
+  expect(links["issue:acme/widgets#42"]).toEqual([
+    { ...pr42, kind: "issue", threadId: issueThread.threadId, createdAt: expect.any(String) },
+  ]);
+  await expect(rpc(host, "threadItem", { threadId: first.threadId })).resolves.toEqual({ ...pr42, kind: "pr" });
+  await expect(rpc(host, "threadItem", { threadId: second.threadId })).resolves.toEqual({ repo: "Acme/Widgets", number: 42, kind: "pr" });
+  await expect(rpc(host, "threadItem", { threadId: issueThread.threadId })).resolves.toEqual({ ...pr42, kind: "issue" });
+  expect(host.harness.inspection.realtimeSignals.filter(signal => signal.channel === "links-changed")).toHaveLength(3);
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+it("ignores malformed and mismatched stored manual links without losing valid history", async () => {
+  const { host } = await startAutoFixers();
+  const { threadId } = await sendManualAgent(host);
+  const before = await agentLinks(host);
+  const [key] = await host.bb.storage.kv.list("link:");
+  expect(key).toBeDefined();
+  await host.bb.storage.kv.set(key!, [
+    ...before.links["pr:acme/widgets#42"]!,
+    { ...pr42, kind: "pr", threadId: null, createdAt: "invalid" },
+    { ...pr42, kind: "issue", threadId, createdAt: "2026-10-12T12:00:00Z" },
+  ]);
+  expect(await agentLinks(host)).toEqual(before);
+});
+
+it("does not lose links when manual sends finish concurrently", async () => {
+  const { host } = await startAutoFixers();
+  const sent = await Promise.all([
+    sendManualAgent(host),
+    sendManualAgent(host, { repo: "ACME/widgets", number: 42, kind: "pr" }),
+    sendManualAgent(host),
+  ]);
+  const { links } = await agentLinks(host);
+  expect(links["pr:acme/widgets#42"]).toHaveLength(3);
+  expect(links["pr:acme/widgets#42"]!.map(link => link.threadId).sort()).toEqual(sent.map(thread => thread.threadId).sort());
+});
+
+it("keeps manual link history through archival, deletion, and plugin reload like GitHub", async () => {
+  const { host } = await startAutoFixers();
+  const { threadId } = await sendManualAgent(host);
+  const before = await agentLinks(host);
+  await host.harness.behavior.emitThreadEvent("thread.archived", {
+    thread: makeThreadResponse({ id: threadId, archivedAt: 1 }),
+  });
+  await host.harness.behavior.emitThreadEvent("thread.deleted", {
+    thread: makeThreadResponse({ id: threadId, deletedAt: 1 }),
+  });
+  const restarted = await host.harness.lifecycle.reload(plugin);
+  cleanups.push(() => restarted.harness.lifecycle.dispose());
+  expect(await agentLinks(restarted)).toEqual(before);
+});
+
+it("does not write a manual link or refresh event if spawning fails", async () => {
+  const { host } = await startAutoFixers();
+  host.harness.sdk.stub("threads.spawn", async () => { throw new Error("provider unavailable"); });
+  await expect(rpc(host, "sendAgent", { ...pr42, kind: "pr" })).rejects.toThrow("provider unavailable");
+  expect((await agentLinks(host)).links).toEqual({});
+  expect(await host.bb.storage.kv.list("thread:")).toEqual([]);
+  expect(await host.bb.storage.kv.list("thread-link:")).toEqual([]);
+  expect(host.harness.inspection.realtimeSignals.filter(signal => signal.channel === "links-changed")).toEqual([]);
+});
+
+it("keeps auto-fixer sessions separate from manual-send badges", async () => {
+  const { host } = await startAutoFixers();
+  await enable(host, pr42);
+  expect((await agentLinks(host)).links).toEqual({});
+  const { threadId } = await sendManualAgent(host);
+  expect((await agentLinks(host)).links["pr:acme/widgets#42"]!.map(link => link.threadId)).toEqual([threadId]);
+});
+
+it("scopes manual links to the configured Gitea account", async () => {
+  const widgets = gitSource("https://gitea.example/prefix/acme/widgets.git");
+  cleanups.push(() => rmSync(widgets, { recursive: true, force: true }));
+  let spawned = 0;
+  const { host } = await start(({ endpoint }) => endpoint.endsWith("/issues/42") ? { json: issue(42) } : { json: [] }, {
+    profiles: [...defaultProfiles, { name: "other", url: defaultProfiles[0]!.url, user: "another-user" }],
+    settings: { teaProfile: "work" },
+    projects: [{ id: "project-1", sources: [{ type: "local_path", path: widgets }] }],
+    threads: { spawn: async () => ({ id: `manual-${++spawned}` }) },
+  });
+  await rpc(host, "sendAgent", { ...pr42, kind: "issue" });
+  const first = await agentLinks(host);
+  await host.harness.behavior.setSettings({ teaProfile: "other" });
+  expect((await agentLinks(host)).links).toEqual({});
+  await rpc(host, "sendAgent", { ...pr42, kind: "issue" });
+  expect((await agentLinks(host)).links["issue:acme/widgets#42"]!.map(link => link.threadId)).toEqual(["manual-2"]);
+  await host.harness.behavior.setSettings({ teaProfile: "work" });
+  expect(await agentLinks(host)).toEqual(first);
+});
+
 it("drafts the agent prompt without starting a thread", async () => {
   const { host } = await startAutoFixers();
   const { prompt } = (await rpc(host, "draftAgent", { ...pr42, kind: "pr" })) as {

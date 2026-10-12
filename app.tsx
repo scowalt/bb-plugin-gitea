@@ -38,7 +38,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Icon } from "@/components/ui/icon";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
@@ -68,6 +68,8 @@ type FileEntry = FilesView["files"][number];
 type FileDiff = FileEntry["diff"];
 type Freshness = ConversationView["freshness"];
 type ItemRef = { kind: "issue" | "pr"; repo: string; number: number };
+type LinksView = PluginRpcResult<(typeof giteaRpcContract)["listLinks"]>;
+type ThreadLink = LinksView["links"][string][number];
 type Loadable<T> =
   | { state: "loading" }
   | { state: "ready"; value: T }
@@ -840,6 +842,103 @@ function useCoalesced(run: () => void, delayMs: number) {
 
 function errorText(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function agentLinkKey(item: ItemRef) {
+  return `${item.kind}:${itemTag(item)}`;
+}
+
+function useLinks(account: string | null): LinksView["links"] {
+  const rpc = useRpc<typeof giteaRpcContract>();
+  const connection = useRealtimeConnectionState();
+  const [result, setResult] = useState<LinksView | null>(null);
+  const requestId = useRef(0);
+  const refetch = useCallback(async () => {
+    const request = ++requestId.current;
+    if (account === null) {
+      setResult(null);
+      return;
+    }
+    try {
+      const next = await rpc.call("listLinks");
+      if (request === requestId.current) setResult(next);
+    } catch {
+      // Like GitHub, a failed refresh leaves the last known links in place.
+    }
+  }, [account, rpc]);
+  useEffect(() => {
+    void refetch();
+    return () => { requestId.current += 1; };
+  }, [refetch, connection]);
+  useRealtime("links-changed", refetch);
+  return result?.account === account ? result.links : {};
+}
+
+function useSpawn() {
+  const rpc = useRpc<typeof giteaRpcContract>();
+  const navigate = useBbNavigate();
+  const pending = useRef(false);
+  const [spawning, setSpawning] = useState(false);
+  const spawn = useCallback(async ({ repo, number, kind }: ItemRef) => {
+    if (pending.current) return;
+    pending.current = true;
+    setSpawning(true);
+    try {
+      const { threadId } = await rpc.call("sendAgent", { repo, number, kind });
+      navigate.toThread(threadId);
+    } catch (error) {
+      toast.error(errorText(error, "Could not send an agent"));
+    } finally {
+      pending.current = false;
+      setSpawning(false);
+    }
+  }, [navigate, rpc]);
+  return { spawn, spawning };
+}
+
+function ThreadPills({ links }: { links: ThreadLink[] | undefined }) {
+  const navigate = useBbNavigate();
+  if (!links?.length) return null;
+  return (
+    <span className="flex shrink-0 flex-wrap items-center gap-1">
+      {links.map((link, index) => (
+        <button
+          key={link.threadId}
+          type="button"
+          title={`Open BB thread ${link.threadId}`}
+          aria-label={`Open BB thread ${link.threadId}`}
+          className={badgeVariants({ variant: "secondary", className: "cursor-pointer whitespace-nowrap hover:bg-accent" })}
+          onClick={(event) => {
+            event.stopPropagation();
+            navigate.toThread(link.threadId);
+          }}
+        >
+          ⚡ agent{links.length > 1 ? ` ${index + 1}` : ""}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+function ItemAgentActions({ item, links }: { item: ItemRef; links: ThreadLink[] | undefined }) {
+  const { spawn, spawning } = useSpawn();
+  return (
+    <span className="flex shrink-0 flex-wrap items-center gap-2 px-3 pb-3 sm:p-0">
+      <ThreadPills links={links} />
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7"
+        disabled={spawning}
+        onClick={(event) => {
+          event.stopPropagation();
+          void spawn(item);
+        }}
+      >
+        {spawning ? "…" : item.kind === "issue" ? "Start" : "Review"}
+      </Button>
+    </span>
+  );
 }
 
 const loading = { state: "loading" } as const;
@@ -1811,6 +1910,8 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
   const settings = useScopeWatch();
   const memory = useDisplayMemory();
   const status = trustedStatus(memory, settings);
+  const links = useLinks(trustedAccount(memory, settings));
+  const { spawn, spawning } = useSpawn();
   const loadStatus = useCallback(async () => {
     try {
       await verifyScope(rpc);
@@ -1851,6 +1952,7 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
     [shown],
   );
   const threadId = shown.state === "ready" ? shown.value.threadId : null;
+  const detailLinks = detail ? links[agentLinkKey(detail)] : undefined;
   const [labelsDraft, setLabelsDraft] = useState<string[]>([]);
   const [assigneesDraft, setAssigneesDraft] = useState<string[]>([]);
   const [savingMetadata, setSavingMetadata] = useState(false);
@@ -1960,21 +2062,6 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
     },
     [detail, refreshDetail, reviewBody, reviewPending, rpc],
   );
-  const draftAgent = useCallback(async () => {
-    if (!detail) return;
-    try {
-      const { prompt } = await rpc.call("draftAgent", {
-        repo: detail.repo,
-        number: detail.number,
-        kind: detail.kind,
-      });
-      navigate.toCompose({ initialPrompt: prompt, focusPrompt: true });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not draft an agent prompt",
-      );
-    }
-  }, [detail, navigate, rpc]);
   const saveMetadata = useCallback(
     async (labels: string[], assignees: string[]) => {
       if (!detail) return;
@@ -2215,8 +2302,8 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                 {detail.draft ? "Mark ready" : "Convert to draft"}
               </Button>
             )}
-            <Button size="sm" onClick={() => void draftAgent()}>
-              Draft with agent
+            <Button size="sm" disabled={spawning} onClick={() => void spawn(detail)}>
+              {spawning ? "…" : detail.kind === "issue" ? "Send agent" : "Review with agent"}
             </Button>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -2239,7 +2326,8 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                 {detail.baseRefName} ← {detail.headRefName}
               </span>
             )}
-            {threadId && (
+            <ThreadPills links={detailLinks} />
+            {threadId && !detailLinks?.length && (
               <Button
                 size="sm"
                 variant="link"
@@ -2304,6 +2392,12 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
             </section>
           </main>
           <aside className="space-y-3">
+            {!!detailLinks?.length && (
+              <section aria-label="Agents" className="space-y-2 rounded-lg border border-border bg-card p-3">
+                <h3 className="text-xs font-semibold text-muted-foreground">Agents</h3>
+                <ThreadPills links={detailLinks} />
+              </section>
+            )}
             <section className="space-y-3 rounded-lg border border-border bg-card p-3">
               <ChipPicker
                 label="Labels"
@@ -2686,6 +2780,7 @@ function GiteaPanel({ subPath }: PluginNavPanelProps) {
                             ))}
                           </span>
                         </button>
+                        <ItemAgentActions item={item} links={links[agentLinkKey(item)]} />
                         {item.autoFixer && (
                           <span className="px-3 pb-3 sm:p-0">
                             <AutoFixerControls

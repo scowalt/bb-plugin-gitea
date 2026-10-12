@@ -11,7 +11,7 @@ Browse and act on Gitea issues and pull requests from BB, and let a BB agent fix
 ## Install
 
 ```sh
-bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.0.6'
+bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.0.7'
 bb plugin update gitea --yes   # later, to update
 ```
 
@@ -48,9 +48,13 @@ An issue or pull request opens on **Conversation**, where you can:
 - review (comment, request changes, approve);
 - see checks (click one to open its run) and reviews;
 - follow issue sidebar links: **Blocked by** and **Blocking** come from Gitea dependencies, while **Related references** are issue mentions in the description and comments (`#N`, `owner/repo#N`, or same-instance issue URLs). Clicking one opens that issue in the Gitea plugin panel. These are not editable relationships; failed dependency reads show **Blockers unavailable** rather than an empty list.
-- draft an agent thread (**Draft with agent** pre-fills the BB compose form so you can add skills before submitting).
+- start an agent immediately (**Send agent** for an issue, **Review with agent** for a pull request), then open its BB thread. It uses the saved `agent-execution` selection or the project's execution defaults; there is no draft/composer step.
 
 **Files changed** shows a file tree and diffs, unified or split. Click the `+` beside a line to leave a line comment; existing line comments appear under their line and in the conversation.
+
+List rows also have **Start** (issues) and **Review** (pull requests). Successful manual sends append a persistent link, including sends from `bb gitea send-agent`. Lists and details show clickable **⚡ agent** badges, numbered when there are multiple threads; details also have an **Agents** sidebar section. Badges refresh when another client sends an agent. Like the GitHub plugin, these are historical associations, not live running-status indicators, and archiving or deleting a thread does not erase the record. Auto-fixers keep their separate controls and status indicators.
+
+New link history is scoped to the configured Gitea server and login. Older single-thread links still open from detail; threads created through the former unlinked **Draft with agent** flow cannot be reconstructed automatically.
 
 The same views appear in the side panel of a BB thread linked to the item.
 
