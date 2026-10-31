@@ -147,6 +147,27 @@ Comment ids come from `bb gitea conversation ... --json`. `--old` puts a line co
 - Gitea marks a draft by title prefix. `draft on` adds `WIP: `; `draft off` removes `WIP:` or `[WIP]`.
 - Agent threads started with **send-agent** are told not to write to Gitea unless asked. Auto-fixers are the exception, within their switches.
 
+## CI
+
+Woodpecker runs the existing TypeScript, unit/UI tests, and headless server/app/host
+build on pushes and pull requests. Node 24.20.0, Bun 1.3.11 and bb-app 0.48.1 are
+pinned. Tests use fake `tea`; CI gets no Gitea login, BB server, publishing token,
+or host socket and does not install or reload the plugin.
+
+The unchanged `package-lock.json` remains authoritative. Bun's frozen import
+creates a disposable `bun.lock`, not a second maintained lock. Npm bootstraps only
+the pinned Bun tool; native tooling uses the Node image's matching node-gyp and
+system Python. Existing SDK/deprecation warnings remain visible; no SDK update,
+minimum-version matrix proof, or published bundle is implied.
+
+Install the staged Gitleaks hook before committing:
+
+```sh
+mise trust
+mise install
+mise exec -- lefthook install
+```
+
 ## Development
 
 ```sh
