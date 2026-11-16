@@ -56,7 +56,9 @@ List rows also have **Start** (issues) and **Review** (pull requests). Successfu
 
 New link history is scoped to the configured Gitea server and login. Older single-thread links still open from detail; threads created through the former unlinked **Draft with agent** flow cannot be reconstructed automatically.
 
-The same views appear in the side panel of a BB thread linked to the item.
+The same views appear in the side panel of a BB thread linked to the item. A thread can have more than one linked item; the side panel then shows a menu at the top to switch between them.
+
+To attach an item to a thread that already exists, run `bb gitea link <issue|pr> <owner/repo> <number>` from that thread, or pass `--thread <thread-id>`. The link gets the same **⚡ agent** badge and **Agents** entry as a send. Linking an item that is already linked changes nothing. `bb gitea unlink` takes the same arguments and removes the link. Linking reads the item from Gitea to check that it exists and is the kind you named; it writes nothing to Gitea.
 
 ## Gitea environment
 
@@ -126,7 +128,8 @@ bb gitea draft <owner/repo> <number> on|off
 bb gitea review <owner/repo> <number> <APPROVED|REQUEST_CHANGES|COMMENT> [body]
 bb gitea send-agent <issue|pr> <owner/repo> <number>
 bb gitea agent-execution [<provider> <model> <reasoning> [fast|default] | default]
-bb gitea thread <thread-id>
+bb gitea thread <thread-id>                                # every linked item
+bb gitea link|unlink <issue|pr> <owner/repo> <number> [--thread <thread-id>]
 bb gitea auto-fix|auto-merge <owner/repo> <number> on|off
 bb gitea auto-fixer-status|auto-fixer-retry <owner/repo> <number>
 bb gitea pr-watch <owner/repo> <number> [--since token] [--timeout seconds]

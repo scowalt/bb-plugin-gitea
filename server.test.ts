@@ -3202,9 +3202,9 @@ it("records every successful manual send by item and keeps the reverse lookup", 
   expect(links["issue:acme/widgets#42"]).toEqual([
     { ...pr42, kind: "issue", threadId: issueThread.threadId, createdAt: expect.any(String) },
   ]);
-  await expect(rpc(host, "threadItem", { threadId: first.threadId })).resolves.toEqual({ ...pr42, kind: "pr" });
-  await expect(rpc(host, "threadItem", { threadId: second.threadId })).resolves.toEqual({ repo: "Acme/Widgets", number: 42, kind: "pr" });
-  await expect(rpc(host, "threadItem", { threadId: issueThread.threadId })).resolves.toEqual({ ...pr42, kind: "issue" });
+  await expect(rpc(host, "threadItems", { threadId: first.threadId })).resolves.toEqual({ items: [{ ...pr42, kind: "pr" }] });
+  await expect(rpc(host, "threadItems", { threadId: second.threadId })).resolves.toEqual({ items: [{ repo: "Acme/Widgets", number: 42, kind: "pr" }] });
+  await expect(rpc(host, "threadItems", { threadId: issueThread.threadId })).resolves.toEqual({ items: [{ ...pr42, kind: "issue" }] });
   expect(host.harness.inspection.realtimeSignals.filter(signal => signal.channel === "links-changed")).toHaveLength(3);
   expect(calls.every(call => call.method === "GET")).toBe(true);
 });
@@ -3286,6 +3286,133 @@ it("scopes manual links to the configured Gitea account", async () => {
   expect((await agentLinks(host)).links["issue:acme/widgets#42"]!.map(link => link.threadId)).toEqual(["manual-2"]);
   await host.harness.behavior.setSettings({ teaProfile: "work" });
   expect(await agentLinks(host)).toEqual(first);
+});
+
+function linkSignals(host: Host) {
+  return host.harness.inspection.realtimeSignals.filter(signal => signal.channel === "links-changed");
+}
+
+async function threadItems(host: Host, threadId: string) {
+  return giteaRpcContract.threadItems.output.parse(await rpc(host, "threadItems", { threadId })).items;
+}
+
+it("links an existing thread to an item from the CLI, defaulting to the calling thread", async () => {
+  const { host, calls } = await startAutoFixers();
+  const linked = await host.harness.behavior.runCli(["link", "pr", "acme/widgets", "42"], { threadId: "thr_existing" });
+  expect(linked).toMatchObject({ exitCode: 0, stdout: "Linked pr acme/widgets#42 to thr_existing.\nacme/widgets#42 pr" });
+  expect((await agentLinks(host)).links["pr:acme/widgets#42"]).toEqual([
+    { ...pr42, kind: "pr", threadId: "thr_existing", createdAt: expect.any(String) },
+  ]);
+  await expect(threadItems(host, "thr_existing")).resolves.toEqual([{ ...pr42, kind: "pr" }]);
+  await expect(
+    rpc(host, "conversation", { ...pr42, kind: "pr", refresh: false }),
+  ).resolves.toMatchObject({ threadId: "thr_existing" });
+  expect(linkSignals(host)).toHaveLength(1);
+  expect(host.harness.sdk.callsTo("threads.spawn")).toHaveLength(0);
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+  const other = await host.harness.behavior.runCli(["link", "pr", "acme/widgets", "44", "--thread", "thr_other", "--json"], { threadId: "thr_existing" });
+  expect(JSON.parse(other.stdout)).toEqual({ changed: true, items: [{ repo: "acme/widgets", number: 44, kind: "pr" }] });
+  const missing = await host.harness.behavior.runCli(["link", "pr", "acme/widgets", "42"]);
+  expect(missing).toMatchObject({ exitCode: 1, stderr: "Pass --thread <thread-id>; link found no calling BB thread." });
+});
+
+it("treats linking the same item to the same thread again as a no-op", async () => {
+  const { host } = await startAutoFixers();
+  const link = (repo = "acme/widgets") => rpc(host, "linkThread", { repo, number: 42, kind: "pr", threadId: "thr_existing" });
+  await expect(link()).resolves.toEqual({ changed: true, items: [{ ...pr42, kind: "pr" }] });
+  const before = await agentLinks(host);
+  await expect(link()).resolves.toEqual({ changed: false, items: [{ ...pr42, kind: "pr" }] });
+  await expect(link("ACME/Widgets")).resolves.toMatchObject({ changed: false });
+  expect(await agentLinks(host)).toEqual(before);
+  await expect(threadItems(host, "thr_existing")).resolves.toHaveLength(1);
+  expect(linkSignals(host)).toHaveLength(1);
+  const again = await host.harness.behavior.runCli(["link", "pr", "acme/widgets", "42", "--thread", "thr_existing"]);
+  expect(again.stdout).toBe("pr acme/widgets#42 was already linked to thr_existing.\nacme/widgets#42 pr");
+});
+
+it("keeps every item linked to one thread, in link order, including the thread send-agent started", async () => {
+  const { host, gitea } = await startAutoFixers();
+  gitea.pulls.set("acme/widgets#45", issue(45));
+  const { threadId } = await sendManualAgent(host);
+  await Promise.all([
+    rpc(host, "linkThread", { repo: "ops/api", number: 7, kind: "pr", threadId }),
+    rpc(host, "linkThread", { repo: "acme/widgets", number: 44, kind: "pr", threadId }),
+    rpc(host, "linkThread", { repo: "acme/widgets", number: 45, kind: "issue", threadId }),
+  ]);
+  const items = await threadItems(host, threadId);
+  expect(items[0]).toEqual({ ...pr42, kind: "pr" });
+  expect(items.map(item => `${item.kind}:${item.repo}#${item.number}`).sort()).toEqual([
+    "issue:acme/widgets#45", "pr:acme/widgets#42", "pr:acme/widgets#44", "pr:ops/api#7",
+  ]);
+  const { links } = await agentLinks(host);
+  for (const key of ["pr:acme/widgets#42", "pr:acme/widgets#44", "pr:ops/api#7", "issue:acme/widgets#45"])
+    expect(links[key]!.map(link => link.threadId)).toEqual([threadId]);
+  const listed = await host.harness.behavior.runCli(["thread", threadId]);
+  expect(listed.stdout.split("\n")).toHaveLength(4);
+  expect(listed.stdout.split("\n")[0]).toBe("acme/widgets#42 pr");
+  await Promise.all([
+    rpc(host, "unlinkThread", { repo: "ops/api", number: 7, kind: "pr", threadId }),
+    rpc(host, "unlinkThread", { repo: "acme/widgets", number: 44, kind: "pr", threadId }),
+    rpc(host, "unlinkThread", { repo: "acme/widgets", number: 45, kind: "issue", threadId }),
+  ]);
+  await expect(threadItems(host, threadId)).resolves.toEqual([{ ...pr42, kind: "pr" }]);
+});
+
+it("rejects links to missing threads and to the wrong item kind without writing", async () => {
+  const { host, gitea, patchThread } = await startAutoFixers();
+  gitea.pulls.set("acme/widgets#45", issue(45));
+  patchThread("thr_gone", { deletedAt: 1 });
+  await expect(rpc(host, "linkThread", { ...pr42, kind: "pr", threadId: "thr_gone" })).rejects.toThrow("BB thread thr_gone was not found.");
+  await expect(rpc(host, "linkThread", { ...pr42, kind: "issue", threadId: "thr_existing" })).rejects.toThrow("acme/widgets#42 is a pull request; link it as pr.");
+  await expect(rpc(host, "linkThread", { repo: "acme/widgets", number: 45, kind: "pr", threadId: "thr_existing" })).rejects.toThrow("acme/widgets#45 is an issue; link it as issue.");
+  expect((await agentLinks(host)).links).toEqual({});
+  expect(await host.bb.storage.kv.list("thread-link:")).toEqual([]);
+  expect(linkSignals(host)).toEqual([]);
+});
+
+it("unlinks one item from a thread and leaves its other links and threads alone", async () => {
+  const { host } = await startAutoFixers();
+  const first = await sendManualAgent(host);
+  await rpc(host, "linkThread", { ...pr42, kind: "pr", threadId: "thr_existing" });
+  await rpc(host, "linkThread", { repo: "acme/widgets", number: 44, kind: "pr", threadId: "thr_existing" });
+  const unlinked = await host.harness.behavior.runCli(["unlink", "pr", "Acme/Widgets", "42"], { threadId: "thr_existing" });
+  expect(unlinked).toMatchObject({ exitCode: 0, stdout: "Unlinked pr Acme/Widgets#42 from thr_existing.\nacme/widgets#44 pr" });
+  await expect(threadItems(host, "thr_existing")).resolves.toEqual([{ repo: "acme/widgets", number: 44, kind: "pr" }]);
+  expect((await agentLinks(host)).links["pr:acme/widgets#42"]!.map(link => link.threadId)).toEqual([first.threadId]);
+  await expect(
+    rpc(host, "conversation", { ...pr42, kind: "pr", refresh: false }),
+  ).resolves.toMatchObject({ threadId: first.threadId });
+  const signals = linkSignals(host).length;
+  await expect(rpc(host, "unlinkThread", { ...pr42, kind: "pr", threadId: "thr_existing" })).resolves.toEqual({
+    changed: false, items: [{ repo: "acme/widgets", number: 44, kind: "pr" }],
+  });
+  expect(linkSignals(host)).toHaveLength(signals);
+  await rpc(host, "unlinkThread", { repo: "acme/widgets", number: 44, kind: "pr", threadId: "thr_existing" });
+  expect((await agentLinks(host)).links["pr:acme/widgets#44"]).toBeUndefined();
+  expect(await host.bb.storage.kv.list("thread-link:thr_existing")).toEqual([]);
+  expect((await host.harness.behavior.runCli(["thread", "thr_existing"])).stdout).toBe("No Gitea items linked.");
+});
+
+it("reads and extends a thread link stored as one item by 1.0.7", async () => {
+  const { host } = await startAutoFixers();
+  await host.bb.storage.kv.set("thread-link:thr_legacy", { ...pr42, kind: "pr" });
+  await expect(threadItems(host, "thr_legacy")).resolves.toEqual([{ ...pr42, kind: "pr" }]);
+  await expect(rpc(host, "linkThread", { ...pr42, kind: "pr", threadId: "thr_legacy" })).resolves.toMatchObject({ changed: true });
+  expect(await host.bb.storage.kv.get("thread-link:thr_legacy")).toEqual([{ ...pr42, kind: "pr" }]);
+  await rpc(host, "linkThread", { repo: "acme/widgets", number: 44, kind: "pr", threadId: "thr_legacy" });
+  expect(await host.bb.storage.kv.get("thread-link:thr_legacy")).toEqual([
+    { ...pr42, kind: "pr" },
+    { repo: "acme/widgets", number: 44, kind: "pr" },
+  ]);
+  await host.bb.storage.kv.set("thread-link:thr_unlink_legacy", { ...pr42, kind: "pr" });
+  await rpc(host, "unlinkThread", { ...pr42, kind: "pr", threadId: "thr_unlink_legacy" });
+  expect(await host.bb.storage.kv.list("thread-link:thr_unlink_legacy")).toEqual([]);
+});
+
+it("lists an auto-fixer's pull request on its thread", async () => {
+  const { host } = await startAutoFixers();
+  await enable(host, pr42);
+  await expect(threadItems(host, "auto-fixer-1")).resolves.toEqual([{ ...pr42, kind: "pr" }]);
 });
 
 it("drafts the agent prompt without starting a thread", async () => {
