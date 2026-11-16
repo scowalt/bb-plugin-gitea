@@ -45,6 +45,7 @@
     "display-cache.ts",
     "pull-files-view.ts",
     "auto-fixer.ts",
+    "repository.ts",
     "draft-title.ts",
     "item-status.ts",
     "issue-blockers.ts",

@@ -4,6 +4,7 @@ import {
   type PluginRpcHandlers,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { repositorySchema } from "./repository.js";
 import { execFile, type ExecFileException } from "node:child_process";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -73,7 +74,6 @@ import {
   itemKey,
   parseItemRef,
   repoKey,
-  repositorySchema,
   sameSession,
   type WatchingSession,
   sessionView,

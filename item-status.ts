@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { repositorySchema } from "./auto-fixer.js";
+import { repositorySchema } from "./repository.js";
 
 export const ciStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("passing"), total: z.number().int() }),

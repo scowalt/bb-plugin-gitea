@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { repositoryPattern, repositorySchema } from "./repository.js";
 
 export const autoFixerExecutionSchema = z
   .object({
@@ -77,8 +78,6 @@ export const defaultAutoFixerPreferences: AutoFixerPreferences = {
   },
 };
 
-export const repositoryPattern = /^[\w.-]+\/[\w.-]+$/;
-export const repositorySchema = z.string().regex(repositoryPattern);
 
 const sessionBase = z.object({
   repo: repositorySchema,

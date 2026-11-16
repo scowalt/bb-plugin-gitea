@@ -1,0 +1,281 @@
+[
+  {
+    "name": "tea pr create with an OSC-8 link",
+    "thread": "thr_gg9b76pecj",
+    "rows": [
+      {
+        "seq": 2137,
+        "createdAt": 1794861854545,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da04353bae-i355"
+          }
+        }
+      },
+      {
+        "seq": 2139,
+        "createdAt": 1794861867138,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da04353bae-i355",
+            "command": "cd $BB_THREAD_STORAGE && cat > pr-body.md <<'EOF'\n…\nEOF\ntea pr create --repo wonderlydotcom/internal-tool-camp --head scott/collections-stale-waiver-deadline --base main --title \"fix(collections): Hold the drafts while the waiver deadline is not after the demand date\" --description \"$(cat pr-body.md)\" 2>&1 | tail -5",
+            "aggregatedOutput": "  • No Conflicts                                                              \n  • Maintainers are allowed to edit                                           \n                                                                              \n  \u001b]8;id=1380652732;https://git.wonderly.info/wonderlydotcom/internal-tool-camp/pulls/4134\u0007https://git.wonderly.info/wonderlydotcom/internal-tool-camp/pulls/4134\u001b]8;;\u0007      \n\n",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "three tea api POST creates in one command",
+    "thread": "thr_kahrpdc7fi",
+    "rows": [
+      {
+        "seq": 1249,
+        "createdAt": 1794583024552,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dad289bfea-i233"
+          }
+        }
+      },
+      {
+        "seq": 1253,
+        "createdAt": 1794583044405,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dad289bfea-i233",
+            "command": "cd $BB_THREAD_STORAGE/pr && mk(){ jq -n --arg t \"$2\" --arg b \"$(cat $3)\" --arg h \"$4\" '{title:$t, body:$b, head:$h, base:\"main\"}' > /tmp/pr_$$.json; tea api -X POST repos/wonderlydotcom/$1/pulls -d @/tmp/pr_$$.json | jq -r '.number, .html_url'; rm /tmp/pr_$$.json; }\nmk internal-tool-csm-ops \"feat(csm-ops): Count CSMs with broken connections and check-ins without transcripts for the roadmap\" csm-ops.md feat/csm-connections-count\nmk internal-tools-instance \"feat(csm-ops): Let the CAMP Eng Roadmap read CSM connection counts\" instance.md feat/roadmap-csm-connections-scope\nmk internal-tool-camp-eng-roadmap \"feat(goals): Read CSM connection health from CSM Ops hourly\" roadmap.md feat/csm-connections-goal",
+            "aggregatedOutput": "1134\nhttps://git.wonderly.info/wonderlydotcom/internal-tool-csm-ops/pulls/1134\n2500\nhttps://git.wonderly.info/wonderlydotcom/internal-tools-instance/pulls/2500\n51\nhttps://git.wonderly.info/wonderlydotcom/internal-tool-camp-eng-roadmap/pulls/51\n",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "create output that prints an older PR from the body first",
+    "thread": "thr_95kbvf458h",
+    "rows": [
+      {
+        "seq": 5260,
+        "createdAt": 1794326331086,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da4d3e69c5-i117"
+          }
+        }
+      },
+      {
+        "seq": 5263,
+        "createdAt": 1794326334167,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da4d3e69c5-i117",
+            "command": "cd $BB_THREAD_STORAGE/ws-remove-initial-password && for i in 1 2 3; do out=$(tea pulls create --repo wonderlydotcom/workspace-security --base main --head feat/remove-initial-password --title \"revert(directory): Remove the unused initial password operation\" --description \"$(cat $BB_THREAD_STORAGE/ws-remove-initial-password-pr-body.md)\" 2>&1) && break; sleep 5; done; echo \"$out\" | rg -o \"https://git.wonderly.info/[^ ]*pulls/[0-9]+\" | head -1; echo \"$out\" | tail -3",
+            "aggregatedOutput": "https://git.wonderly.info/wonderlydotcom/internal-tool-people-ops/pulls/413\n  • Maintainers are allowed to edit                                           \n                                                                              \n  \u001b]8;id=2161593711;https://git.wonderly.info/wonderlydotcom/workspace-security/pulls/83\u0007https://git.wonderly.info/wonderlydotcom/workspace-security/pulls/83\u001b]8;;\u0007        \n",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "quiet git push that prints only the remote PR line",
+    "thread": "thr_5zds6pfbx8",
+    "rows": [
+      {
+        "seq": 1872,
+        "createdAt": 1794798474098,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da0a37c300-i213"
+          }
+        }
+      },
+      {
+        "seq": 1874,
+        "createdAt": 1794798475541,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da0a37c300-i213",
+            "command": "cd $BB_THREAD_STORAGE/roadmap-64 && git add -A && git commit -q -m \"fix(goals): Say customers are on old terms and share the mid-sentence label helper\" && git push -q origin HEAD:feat/current-terms-reader 2>&1 | tail -2; sha=$(git rev-parse HEAD); echo $sha",
+            "aggregatedOutput": "remote:   https://git.wonderly.info/wonderlydotcom/internal-tool-camp-eng-roadmap/pulls/64        \nremote: \n2121de75406d39d1dfc15dfcad7a227f8dd70a09\n",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "tea api GET of several pulls",
+    "thread": "thr_kahrpdc7fi",
+    "rows": [
+      {
+        "seq": 38,
+        "createdAt": 1794581722978,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dad289bfea-i6"
+          }
+        }
+      },
+      {
+        "seq": 51,
+        "createdAt": 1794581724580,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dad289bfea-i6",
+            "command": "for spec in \"internal-tool-csm-ops 1087\" \"internal-tool-csm-ops 1131\" \"internal-tools-instance 2467\" \"internal-tools-instance 2499\" \"internal-tool-camp-eng-roadmap 40\" \"internal-tool-camp-eng-roadmap 48\"; do set -- $spec; echo \"=== $1 #$2\"; tea api repos/wonderlydotcom/$1/pulls/$2 | jq -r '.title, .state, .merged, .head.ref, .merge_commit_sha, .body' | head -80; done",
+            "aggregatedOutput": "=== internal-tool-csm-ops #1087\nfeat(csm-ops): Count broken customer accounts for the roadmap\nclosed\ntrue",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "tea api POST of an issue comment and a PATCH of a pull",
+    "thread": "thr_95kbvf458h",
+    "rows": [
+      {
+        "seq": 4527,
+        "createdAt": 1794322589507,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da32b6291a-i51"
+          }
+        }
+      },
+      {
+        "seq": 4532,
+        "createdAt": 1794322595297,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da32b6291a-i51",
+            "command": "cd /home/scowalt/.bb/plugins/environment-git-worktree/host-data/worktrees/thr_95kbvf458h-1/internal-tool-people-ops && R=repos/wonderlydotcom/internal-tool-people-ops\nc413='Superseded.'\nc410='Superseded.'\nfor pair in \"413|$c413\" \"410|$c410\"; do n=${pair%%|*}; body=${pair#*|}; for i in 1 2 3; do out=$(tea api -X POST $R/issues/$n/comments -d \"$(jq -nc --arg b \"$body\" '{body:$b}')\" 2>&1) && break; sleep 5; done; echo \"$n comment: $(echo \"$out\" | jq -r '.html_url // .message // .' 2>/dev/null | head -2)\"; for i in 1 2 3; do out=$(tea api -X PATCH $R/pulls/$n -d '{\"state\":\"closed\"}' 2>&1) && break; sleep 5; done; echo \"$n close: $(echo \"$out\" | jq -r '\"state=\\(.state) merged=\\(.merged)\"' 2>/dev/null || echo \"$out\" | head -3)\"; done",
+            "aggregatedOutput": "413 comment: https://git.wonderly.info/wonderlydotcom/internal-tool-people-ops/pulls/413#issuecomment-275721\n413 close: state=closed merged=false\n410 comment: https://git.wonderly.info/wonderlydotcom/internal-tool-people-ops/pulls/410#issuecomment-275723\n410 close: state=closed merged=false\n",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "watch.mjs add printing the PR it watches",
+    "thread": "thr_gg9b76pecj",
+    "rows": [
+      {
+        "seq": 2253,
+        "createdAt": 1794862450122,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da0f42ef3b-i2"
+          }
+        }
+      },
+      {
+        "seq": 2256,
+        "createdAt": 1794862451136,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da0f42ef3b-i2",
+            "command": "node ~/Code/assistant/bb-lore-fixer/watch.mjs add wonderlydotcom/internal-tool-camp 4134 --merge 2>&1 | tail -4; tea api \"repos/wonderlydotcom/internal-tool-camp/actions/runs?head_sha=c84e51100b02f42f061fe711034bbed9105152ac\" | jq -r '.workflow_runs[] | [.path, .status, (.conclusion//\"\")] | @tsv' | sed 's/@refs[^\\t]*//' | sort -u",
+            "aggregatedOutput": "Watching https://git.wonderly.info/wonderlydotcom/internal-tool-camp/pulls/4134 for @thread:thr_gg9b76pecj.\nEvery 10 minutes the bb-lore-fixer automation checks it. Once every required check passed, Lore is clean and Gitea can merge it, it will merge it itself in the repo's merge style (Scott said to ship it), then message this thread how the deploy went. It also messages you if CI fails, it conflicts, CI never starts, Lore has open findings or the merge is refused.",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "tea pr list",
+    "thread": "thr_5zds6pfbx8",
+    "rows": [
+      {
+        "seq": 1147,
+        "createdAt": 1794604500969,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da3d1ec8ed-i8"
+          }
+        }
+      },
+      {
+        "seq": 1150,
+        "createdAt": 1794604501297,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "da3d1ec8ed-i8",
+            "command": "git show 62738db --format=%B --no-patch | head -60; tea pr list --repo wonderlydotcom/internal-tool-camp-eng-roadmap --state all --limit 5 2>&1 | head -10",
+            "aggregatedOutput": "feat(goals): Read customers-current counts from CSM Ops hourly (#48)\n\n┌───────┬───────────────────────────────────────────────────────────────────────────────────────┬───────┬───────────────┬───────────┬──────────────────┬────────┐\n│ INDEX │                                         TITLE                                         │ STATE │    AUTHOR     │ MILESTONE │     UPDATED      │ LABELS │\n├───────┼───────────────────────────────────────────────────────────────────────────────────────┼───────┼───────────────┼───────────┼──────────────────┼────────┤\n│ 56    │ fix(goals): Name each goal's first measure and say what its label counts              │ open  │ Scott Walters │           │ 2026-11-13 15:56 │        │",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "tea pulls <n> with links to CI runs",
+    "thread": "thr_95kbvf458h",
+    "rows": [
+      {
+        "seq": 63,
+        "createdAt": 1790636417574,
+        "type": "item/started",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dab6adb1a6-i10"
+          }
+        }
+      },
+      {
+        "seq": 66,
+        "createdAt": 1790636418918,
+        "type": "item/completed",
+        "data": {
+          "item": {
+            "type": "commandExecution",
+            "id": "dab6adb1a6-i10",
+            "command": "cd /home/scowalt/.bb/plugins/environment-git-worktree/host-data/worktrees/thr_95kbvf458h-1/internal-tool-people-ops && timeout 30 tea pulls 351 2>&1 | head -80; ls docs/adr | grep 0036; git branch -a --contains 60d207c 2>/dev/null | head",
+            "aggregatedOutput": "\n  # #351 feat: Grant first access through an onboarding recovery window       \n  (merged)                                                                    \n                                                                              \n  @scott created 2026-09-22 13:12\t**main** <- **feat/onboarding-recovery-      \n  window**                                                                    \n                                                                              \n  ## Summary                                                                  \n                                                                              \n  • manage a system-owned Google onboarding recovery group as a resumable     \n  onboarding and audited offboarding effect                                   \n  • sweep recovery memberships after Directory reports a login later than the \n  window-opened event                                                         \n  • reject the recovery group from policies and remove temporary-credential   \n  UI/return behavior                                                          \n  • document the recovery-window domain decision and operator flow            \n                                                                              \n  ## Validation                                                               \n                                                                              \n  • dotnet tool run fantomas .                                                \n  • dotnet build Sso.sln -c Release                                           \n  • dotnet test Sso.sln -c Release                                            \n  • tofu -chdir=infra/opentofu validate                                       \n  • shared review-backend workflow loaded                                     \n                                                                              \n  --------                                                                    \n                                                                              \n  • CI:                                                                       \n      • ✓ \u001b]8;id=3291855224;/wonderlydotcom/internal-tool-people-ops/actions/runs/39926/jobs/62614\u0007**migration-prod-snapshot-gate / determine-migration-gate-required\u001b]8;;\u0007  \n      \u001b]8;id=3291855224;/wonderlydotcom/internal-tool-people-ops/actions/runs/39926/jobs/62614\u0007(pull_****request)**\u001b]8;;\u0007 \u001b]8;id=3291855224;/wonderlydotcom/internal-tool-people-ops/actions/runs/39926/jobs/62614\u0007https://git.wonderly.info/wonderlydotcom/internal-\u001b]8;;\u0007 \n      \u001b]8;id=3291855224;/wonderlydotcom/internal-tool-people-ops/actions/runs/39926/jobs/62614\u0007tool-people-ops/pulls/wonderlydotcom/internal-tool-people-\u001b]8;;\u0007              \n      \u001b]8;id=3291855224;/wonderlydotcom/internal-tool-people-ops/actions/runs/39926/jobs/62614\u0007ops/actions/runs/39926/jobs/62614\u001b]8;;\u0007: Successful in 7s                     \n      • ✓ \u001b]8;id=2015737033;/wonderlydotcom/internal-tool-people-ops/actions/runs/39928/jobs/62619\u0007**PR Backend Tests / detect-backend-changes (pull_****request)**\u001b]8;;\u0007    \n      \u001b]8;id=2015737033;/wonderlydotcom/internal-tool-people-ops/actions/runs/39928/jobs/62619\u0007https://git.wonderly.info/wonderlydotcom/internal-tool-people-\u001b]8;;\u0007          \n      \u001b]8;id=2015737033;/wonderlydotcom/internal-tool-people-ops/actions/runs/39928/jobs/62619\u0007ops/pulls/wonderlydotcom/internal-tool-people-\u001b]8;;\u0007                          \n      \u001b]8;id=2015737033;/wonderlydotcom/internal-tool-people-ops/actions/runs/39928/jobs/62619\u0007ops/actions/runs/39928/jobs/62619\u001b]8;;\u0007: Successful in 6s                     \n      • ✓ \u001b]8;id=4030770151;/wonderlydotcom/internal-tool-people-ops/actions/runs/39935/jobs/62628\u0007**PR Title / pr-title (pull_****request)**\u001b]8;;\u0007 \u001b]8;id=4030770151;/wonderlydotcom/internal-tool-people-ops/actions/runs/39935/jobs/62628\u0007https://git.wonderly.\u001b]8;;\u0007    \n      \u001b]8;id=4030770151;/wonderlydotcom/internal-tool-people-ops/actions/runs/39935/jobs/62628\u0007info/wonderlydotcom/internal-tool-people-\u001b]8;;\u0007                               \n      \u001b]8;id=4030770151;/wonderlydotcom/internal-tool-people-ops/actions/runs/39935/jobs/62628\u0007ops/pulls/wonderlydotcom/internal-tool-people-\u001b]8;;\u0007                          \n      \u001b]8;id=4030770151;/wonderlydotcom/internal-tool-people-ops/actions/runs/39935/jobs/62628\u0007ops/actions/runs/39935/jobs/62628\u001b]8;;\u0007: Successful in 2s                     ",
+            "exitCode": 0
+          }
+        }
+      }
+    ]
+  }
+]

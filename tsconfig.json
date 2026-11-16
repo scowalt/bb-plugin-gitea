@@ -33,6 +33,8 @@
     "display-cache.ts",
     "pull-files-view.ts",
     "*.test.ts",
+    "test-support.ts",
+    "thread-items/*.ts",
     "app.tsx",
     "app-issue-filter.test.tsx",
     "app-agent-links.test.tsx",
