@@ -71,7 +71,10 @@ function mount(
 ) {
   return renderSlot(app.threadPanelActions[0]!, { threadId: "thr_existing", params: null }, {
     rpc: {
-      threadItems: () => ({ items: items() }),
+      threadItems: () => ({
+        pulls: items().filter((item) => item.kind === "pr"),
+        issues: items().filter((item) => item.kind === "issue"),
+      }),
       itemStatus: (input: unknown) => status(input as Ref),
     },
   });

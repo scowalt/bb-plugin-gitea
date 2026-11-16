@@ -89,6 +89,14 @@ import {
   type ResumableSession,
 } from "./auto-fixer.js";
 import {
+  isThreadItemsCommand,
+  itemRefSchema,
+  registerThreadItems,
+  runThreadItemsCommand,
+  threadItemsRpcMethods,
+  threadLinkSchema,
+} from "./thread-items/index.js";
+import {
   classifyIssueBlockers,
   issueBlockerStateSchema,
   type IssueBlockerState,
@@ -231,17 +239,6 @@ const pullRefSchema = z.object({
   number: z.number().int().positive(),
 });
 const threadIdSchema = z.object({ threadId: z.string().min(1) });
-const itemRefSchema = pullRefSchema.extend({ kind: z.enum(["issue", "pr"]) });
-type ItemRef = z.infer<typeof itemRefSchema>;
-const threadLinkSchema = itemRefSchema.extend({
-  threadId: z.string().min(1),
-  createdAt: z.string(),
-}).strict();
-type ThreadLink = z.infer<typeof threadLinkSchema>;
-const threadItemsSchema = z.object({ items: z.array(itemRefSchema) });
-const threadLinkChangeSchema = threadItemsSchema.extend({
-  changed: z.boolean(),
-});
 
 export const giteaRpcContract = defineRpcContract({
   status: {
@@ -433,18 +430,6 @@ export const giteaRpcContract = defineRpcContract({
     }),
     output: okSchema,
   },
-  threadItems: {
-    input: threadIdSchema,
-    output: threadItemsSchema,
-  },
-  linkThread: {
-    input: itemRefSchema.extend(threadIdSchema.shape),
-    output: threadLinkChangeSchema,
-  },
-  unlinkThread: {
-    input: itemRefSchema.extend(threadIdSchema.shape),
-    output: threadLinkChangeSchema,
-  },
   refresh: {
     input: z.null(),
     output: z.object({
@@ -511,6 +496,7 @@ export const giteaRpcContract = defineRpcContract({
     output: autoFixerPreferencesSchema,
   },
   ...branchRpcMethods,
+  ...threadItemsRpcMethods,
 });
 
 type Repo = { repo: string; projectId: string | null; hostId?: string };
@@ -626,7 +612,9 @@ function pickItems(page: ItemPage, query: string) {
 }
 
 /** Badge state of an open pull request from its head commit's combined status. */
-export function pullCiStatus(combined: Record<string, unknown>): PullStatus {
+export function pullCiStatus(
+  combined: Record<string, unknown>,
+): Extract<PullStatus, "none" | "passing" | "failing" | "running"> {
   if (Number(combined.total_count) === 0) return "none";
   switch (checkStatus(text(combined.state))) {
     case "success":
@@ -858,6 +846,7 @@ export default async function plugin(bb: BbPluginApi) {
     conversations.invalidate(tag);
     itemStatuses.invalidate(tag);
     publishDisplay(tag);
+    threadItems.expire(repo, number);
   }
   function forgetLists() {
     itemLists.invalidate(listTag);
@@ -1185,6 +1174,18 @@ export default async function plugin(bb: BbPluginApi) {
       ? null
       : await pullDiff(repo, number, signal);
     return { files, raw, truncated: page.truncated };
+  }
+
+  async function readCiStatus(repo: string, sha: string, signal?: AbortSignal) {
+    const combined = await api(
+      repoPath(repo, `commits/${encodeURIComponent(sha)}/status`),
+      { signal },
+    );
+    return pullCiStatus(
+      typeof combined === "object" && combined !== null && !Array.isArray(combined)
+        ? (combined as Record<string, unknown>)
+        : {},
+    );
   }
 
   async function displayAccount() {
@@ -1773,147 +1774,17 @@ export default async function plugin(bb: BbPluginApi) {
   const autoStartIntervalMs = 5 * 60_000;
   const autoFixerKey = (repo: string, number: number) =>
     `${autoFixerPrefix}${itemKey(repo, number)}`;
-  const threadKey = (repo: string, number: number) =>
-    `thread:${itemKey(repo, number)}`;
-  async function readThreadId(repo: string, number: number) {
-    const key = threadKey(repo, number);
-    const threadId = await bb.storage.kv.get<string>(key);
-    if (threadId !== undefined) return threadId;
-    const keys = await bb.storage.kv.list("thread:");
-    const match = keys.find((storedKey) => {
-      if (storedKey === key) return false;
-      const separator = storedKey.lastIndexOf(":");
-      return (
-        storedKey.slice(separator + 1) === String(number) &&
-        repoKey(storedKey.slice("thread:".length, separator)) === repoKey(repo)
-      );
-    });
-    return match ? bb.storage.kv.get<string>(match) : undefined;
-  }
-  // Unlike GitHub, Gitea can switch servers/accounts. Keep each link index scoped
-  // to the same identity as the displayed lists rather than sharing repo names.
-  const linkPrefix = (account: string) => `link:${account}:`;
-  const linkItemKey = (link: Pick<ThreadLink, "kind" | "repo" | "number">) =>
-    `${link.kind}:${itemKey(link.repo, link.number)}`;
-
-  async function readLinks(key: string): Promise<ThreadLink[]> {
-    const stored = await bb.storage.kv.get<unknown>(key);
-    if (!Array.isArray(stored)) return [];
-    return stored.flatMap((value) => {
-      const parsed = threadLinkSchema.safeParse(value);
-      return parsed.success ? [parsed.data] : [];
-    });
-  }
-
-  const threadItemsKey = (threadId: string) => `thread-link:${threadId}`;
-
-  // Up to 1.0.7 this key held one item object; writes now store a list.
-  const parseThreadItems = (stored: unknown): ItemRef[] =>
-    (Array.isArray(stored) ? stored : stored ? [stored] : []).flatMap(
-      (value) => {
-        const parsed = itemRefSchema.safeParse(value);
-        return parsed.success ? [parsed.data] : [];
-      },
-    );
-
-  async function readThreadItems(threadId: string): Promise<ItemRef[]> {
-    return parseThreadItems(await bb.storage.kv.get<unknown>(threadItemsKey(threadId)));
-  }
-
-  function updateThreadItems(
-    threadId: string,
-    update: (items: ItemRef[]) => ItemRef[],
-  ): Promise<{ changed: boolean; items: ItemRef[] }> {
-    const key = threadItemsKey(threadId);
-    return queued(key, async () => {
-      const stored = await bb.storage.kv.get<unknown>(key);
-      const current = parseThreadItems(stored);
-      const items = update(current);
-      const changed =
-        items.length !== current.length ||
-        items.some((item, index) => linkItemKey(item) !== linkItemKey(current[index]!));
-      const legacy = stored != null && !Array.isArray(stored);
-      if (changed || legacy) {
-        if (items.length) await bb.storage.kv.set(key, items);
-        else await bb.storage.kv.delete(key);
-      }
-      return { changed, items };
-    });
-  }
-
-  const withItem = (item: ItemRef) => (items: ItemRef[]) =>
-    items.some((entry) => linkItemKey(entry) === linkItemKey(item))
-      ? items
-      : [...items, { repo: item.repo, number: item.number, kind: item.kind }];
-
-  async function addLink(
-    account: string,
-    link: ThreadLink,
-  ): Promise<{ changed: boolean; items: ItemRef[] }> {
-    const key = `${linkPrefix(account)}${linkItemKey(link)}`;
-    const result = await serialized(link.repo, link.number, async () => {
-      const existing = (await readLinks(key)).filter(
-        (entry) => linkItemKey(entry) === linkItemKey(link),
-      );
-      const linked = existing.some((entry) => entry.threadId === link.threadId);
-      if (!linked) {
-        await bb.storage.kv.set(key, [...existing, link]);
-        await bb.storage.kv.set(threadKey(link.repo, link.number), link.threadId);
-      }
-      const thread = await updateThreadItems(link.threadId, withItem(link));
-      return { changed: !linked || thread.changed, items: thread.items };
-    });
-    if (result.changed) bb.realtime.publish("links-changed", { key });
-    return result;
-  }
-
-  async function removeLink(
-    account: string,
-    link: ItemRef & { threadId: string },
-  ): Promise<{ changed: boolean; items: ItemRef[] }> {
-    const key = `${linkPrefix(account)}${linkItemKey(link)}`;
-    const result = await serialized(link.repo, link.number, async () => {
-      const existing = (await readLinks(key)).filter(
-        (entry) => linkItemKey(entry) === linkItemKey(link),
-      );
-      const kept = existing.filter((entry) => entry.threadId !== link.threadId);
-      if (kept.length !== existing.length) {
-        if (kept.length) await bb.storage.kv.set(key, kept);
-        else await bb.storage.kv.delete(key);
-      }
-      const latestKeys = new Set(
-        [link, ...existing].map((entry) => threadKey(entry.repo, entry.number)),
-      );
-      for (const latest of latestKeys) {
-        if ((await bb.storage.kv.get<string>(latest)) !== link.threadId) continue;
-        const previous = kept.at(-1);
-        if (previous) await bb.storage.kv.set(latest, previous.threadId);
-        else await bb.storage.kv.delete(latest);
-      }
-      const thread = await updateThreadItems(link.threadId, (items) =>
-        items.filter((item) => linkItemKey(item) !== linkItemKey(link)),
-      );
-      return {
-        changed: kept.length !== existing.length || thread.changed,
-        items: thread.items,
-      };
-    });
-    if (result.changed) bb.realtime.publish("links-changed", { key });
-    return result;
-  }
-
-  async function listAllLinks() {
-    const account = await displayAccount();
-    const prefix = linkPrefix(account);
-    const links: Record<string, ThreadLink[]> = {};
-    for (const key of await bb.storage.kv.list(prefix)) {
-      const entries = (await readLinks(key)).filter(
-        (entry) => `${prefix}${linkItemKey(entry)}` === key,
-      );
-      if (entries.length) links[key.slice(prefix.length)] = entries;
-    }
-    return { account, links };
-  }
+  const threadItems = await registerThreadItems(bb, {
+    server: () => cleanBaseUrl(config.baseUrl).href,
+    account: displayAccount,
+    pull: (repo, number, signal) =>
+      api(repoPath(repo, `pulls/${number}`), { signal }),
+    ci: readCiStatus,
+    async kind(repo, number) {
+      const issue = record(await api(repoPath(repo, `issues/${number}`)));
+      return issue.pull_request ? "pr" : "issue";
+    },
+  });
 
   const autoFixerThreadKey = (threadId: string) =>
     `auto-fixer-thread:${threadId}`;
@@ -2430,7 +2301,14 @@ export default async function plugin(bb: BbPluginApi) {
       await bb.storage.kv.delete(
         autoFixerThreadKey(decision.replaces.threadId),
       );
-    await updateThreadItems(thread.id, withItem({ repo, number, kind: "pr" }));
+    threadItems.record({
+      threadId: thread.id,
+      repo,
+      number,
+      kind: "pr",
+      source: "auto-fixer",
+      account: await displayAccount(),
+    });
     bb.log.info(`Started Gitean auto-fixer ${thread.id} for ${key}`);
     return { threadId: thread.id };
   }
@@ -2926,20 +2804,11 @@ export default async function plugin(bb: BbPluginApi) {
         })),
       };
     },
-    async readCiStatus(repo, sha, signal) {
-      const combined = await api(
-        repoPath(repo, `commits/${encodeURIComponent(sha)}/status`),
-        { signal },
-      );
-      return pullCiStatus(
-        typeof combined === "object" && combined !== null && !Array.isArray(combined)
-          ? (combined as Record<string, unknown>)
-          : {},
-      );
-    },
+    readCiStatus,
   });
   const handlers = {
     ...branchHandlers,
+    ...threadItems.handlers,
     status: async (
       _input,
       { experimental_signal: signal }: RpcContext = {},
@@ -3011,7 +2880,7 @@ export default async function plugin(bb: BbPluginApi) {
               ),
             ])
           : null,
-        readThreadId(repo, number),
+        threadItems.latestThread(repo, number),
       ]);
       const item = mapItem(repo, issue, kind, base);
       const common = {
@@ -3062,7 +2931,7 @@ export default async function plugin(bb: BbPluginApi) {
           (loadSignal) => readConversation(repo, number, kind, loadSignal),
           { policy: conversationPolicy, signal },
         ),
-        readThreadId(repo, number),
+        threadItems.latestThread(repo, number),
       ]);
       return {
         freshness: freshnessView(display.freshness),
@@ -3321,16 +3190,17 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
       });
-      await addLink(account, {
+      threadItems.record({
+        threadId: thread.id,
         repo,
         number,
         kind,
-        threadId: thread.id,
-        createdAt: now(),
+        source: "sent",
+        account,
       });
       return { threadId: thread.id };
     },
-    listLinks: listAllLinks,
+    listLinks: () => threadItems.badgeLinks(),
     draftAgent: async (
       { repo, number, kind },
       { experimental_signal: signal }: RpcContext = {},
@@ -3357,35 +3227,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       return { ok: true as const };
     },
-    threadItems: async ({ threadId }) => ({
-      items: await readThreadItems(threadId),
-    }),
-    linkThread: async (
-      { repo, number, kind, threadId },
-      { experimental_signal: signal }: RpcContext = {},
-    ) => {
-      const [presence, item, account] = await Promise.all([
-        readThreadPresence(threadId),
-        api(repoPath(repo, `issues/${number}`), { signal }).then(record),
-        displayAccount(),
-      ]);
-      if (presence.state === "deleted")
-        throw new Error(`BB thread ${threadId} was not found.`);
-      const actual = item.pull_request ? "pr" : "issue";
-      if (actual !== kind)
-        throw new Error(
-          `${repo}#${number} is ${actual === "pr" ? "a pull request" : "an issue"}; link it as ${actual}.`,
-        );
-      return await addLink(account, {
-        repo,
-        number,
-        kind,
-        threadId,
-        createdAt: now(),
-      });
-    },
-    unlinkThread: async ({ repo, number, kind, threadId }) =>
-      await removeLink(await displayAccount(), { repo, number, kind, threadId }),
     refresh: async () => {
       repoDiscovery = null;
       repoOptionCache.clear();
@@ -3649,21 +3490,22 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "thread",
-        summary: "List the Gitea items linked to a BB thread",
-        usage: "bb gitea thread <thread-id> [--json]",
+        summary:
+          "List the pull requests a BB thread and its child threads opened, pushed to, or were linked to, with their state",
+        usage: "bb gitea thread [<thread-id>] [--scan] [--json]",
       },
       {
         name: "link",
         summary:
           "Link an issue or pull request to a BB thread (default: the calling thread)",
         usage:
-          "bb gitea link <issue|pr> <owner/repo> <number> [--thread <thread-id>] [--json]",
+          "bb gitea link <issue|pr> <owner/repo> <number> | <url> [--thread <thread-id>] [--json]",
       },
       {
         name: "unlink",
         summary: "Remove an issue or pull request link from a BB thread",
         usage:
-          "bb gitea unlink <issue|pr> <owner/repo> <number> [--thread <thread-id>] [--json]",
+          "bb gitea unlink <issue|pr> <owner/repo> <number> | <url> [--thread <thread-id>] [--json]",
       },
       {
         name: "refresh",
@@ -3750,8 +3592,7 @@ export default async function plugin(bb: BbPluginApi) {
       const since = sinceIndex >= 0 ? (args[sinceIndex + 1] ?? null) : null;
       const timeoutOption =
         timeoutIndex >= 0 ? args[timeoutIndex + 1] : undefined;
-      const threadOption =
-        threadIndex >= 0 ? args[threadIndex + 1] : context?.threadId;
+      const threadOption = threadIndex >= 0 ? args[threadIndex + 1] : undefined;
       for (const index of [
         stateIndex,
         queryIndex,
@@ -3766,9 +3607,10 @@ export default async function plugin(bb: BbPluginApi) {
       const refresh = args.includes("--refresh");
       const old = args.includes("--old");
       const hideBlocked = args.includes("--hide-blocked");
+      const scan = args.includes("--scan");
       const positional = args.filter(
         (value) =>
-          value !== "--json" && value !== "--refresh" && value !== "--old" && value !== "--hide-blocked",
+          value !== "--json" && value !== "--refresh" && value !== "--old" && value !== "--hide-blocked" && value !== "--scan",
       );
       const [command, ...values] = positional;
       const succeed = (value: unknown, human: string) => ({
@@ -3973,39 +3815,17 @@ export default async function plugin(bb: BbPluginApi) {
           const value = await handlers.sendAgent(input);
           return succeed(value, `Started BB thread ${value.threadId}`);
         }
-        const describeItems = (items: ItemRef[]) =>
-          items.map((item) => `${item.repo}#${item.number} ${item.kind}`).join("\n") ||
-          "No Gitea items linked.";
-        if (command === "thread") {
-          const input = threadIdSchema.parse({ threadId: values[0] });
-          const value = await handlers.threadItems(input);
-          return succeed(value, describeItems(value.items));
-        }
-        if (command === "link" || command === "unlink") {
-          if (!threadOption)
-            throw new Error(
-              `Pass --thread <thread-id>; ${command} found no calling BB thread.`,
-            );
-          const input = giteaRpcContract.linkThread.input.parse({
-            kind: values[0],
-            repo: values[1],
-            number: Number(values[2]),
-            threadId: threadOption,
+        if (isThreadItemsCommand(command)) {
+          const result = await runThreadItemsCommand(threadItems, {
+            command,
+            values,
+            thread: threadOption,
+            scan,
+            contextThreadId: context?.threadId,
           });
-          const value =
-            command === "link"
-              ? await handlers.linkThread(input)
-              : await handlers.unlinkThread(input);
-          const ref = `${input.kind} ${input.repo}#${input.number}`;
-          const summary =
-            command === "link"
-              ? value.changed
-                ? `Linked ${ref} to ${input.threadId}.`
-                : `${ref} was already linked to ${input.threadId}.`
-              : value.changed
-                ? `Unlinked ${ref} from ${input.threadId}.`
-                : `${ref} was not linked to ${input.threadId}.`;
-          return succeed(value, `${summary}\n${describeItems(value.items)}`);
+          return result.ok
+            ? succeed(result.value, result.human)
+            : { exitCode: 1, stderr: result.error };
         }
         const onOff = (value: boolean) => (value ? "on" : "off");
         const switchValue = (value: string | undefined) =>

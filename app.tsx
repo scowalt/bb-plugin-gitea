@@ -3223,8 +3223,12 @@ function useThreadItems(threadId: string): Loadable<ItemRef[]> {
   const load = useCallback(async () => {
     const request = ++requestId.current;
     try {
-      const { items } = await rpc.call("threadItems", { threadId });
+      const view = await rpc.call("threadItems", { threadId });
       if (request !== requestId.current) return;
+      const items: ItemRef[] = [
+        ...view.pulls.map(({ repo, number }) => ({ repo, number, kind: "pr" as const })),
+        ...view.issues.map(({ repo, number }) => ({ repo, number, kind: "issue" as const })),
+      ];
       const keys = items.map(agentLinkKey).join(" ");
       // Keep the same objects when another item's links changed, so the shown item does not reload.
       setLinked((previous) =>
@@ -3242,6 +3246,7 @@ function useThreadItems(threadId: string): Loadable<ItemRef[]> {
     return () => { requestId.current += 1; };
   }, [load]);
   useRealtime("links-changed", load);
+  useRealtime("thread-items-changed", load);
   return linked;
 }
 

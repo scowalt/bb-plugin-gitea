@@ -1,0 +1,475 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
+import plugin, { giteaRpcContract } from "./server";
+import { cleanups, start, type Host, type TeaCall, type TeaReply } from "./test-support";
+import { importedKey } from "./thread-items/legacy-import";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const server = "https://gitea.example/prefix/";
+const sha = (char: string) => char.repeat(40);
+const minute = 60_000;
+const t0 = Date.parse("2026-11-16T12:00:00Z");
+
+type Row = { seq: number; createdAt: number; type: string; data: unknown };
+type Child = { id: string; title: string; archived?: boolean };
+
+function url(number: number, repo = "acme/widgets") {
+  return `${server}${repo}/pulls/${number}`;
+}
+
+/** item/started and item/completed rows of one shell command, at seq and seq + 1. */
+function shell(seq: number, at: number, command: string, output: string, exitCode = 0): Row[] {
+  const id = `item-${seq}`;
+  return [
+    { seq, createdAt: at - 2_000, type: "item/started", data: { item: { type: "commandExecution", id } } },
+    {
+      seq: seq + 1,
+      createdAt: at,
+      type: "item/completed",
+      data: { item: { type: "commandExecution", id, command, aggregatedOutput: output, exitCode } },
+    },
+  ];
+}
+const create = (seq: number, at: number, ...numbers: number[]) =>
+  shell(seq, at, "tea pr create --title change", numbers.map((n) => `\u001b]8;id=1;${url(n)}\u0007${url(n)}\u001b]8;;\u0007`).join("\n"));
+const push = (seq: number, at: number, ...numbers: number[]) =>
+  shell(seq, at, "git push -q origin HEAD 2>&1 | tail -2", numbers.map((n) => `remote:   ${url(n)}`).join("\n"));
+function filler(from: number, count: number): Row[] {
+  return Array.from({ length: count }, (_, index) => ({
+    seq: from + index,
+    createdAt: t0,
+    type: "item/completed",
+    data: { item: { type: "agentMessage", id: `message-${from + index}`, text: "" } },
+  }));
+}
+
+function pull(number: number, overrides: Record<string, unknown> = {}) {
+  return {
+    number,
+    title: `Change ${number}`,
+    html_url: url(number),
+    created_at: new Date(t0).toISOString(),
+    state: "open",
+    merged: false,
+    merged_at: null,
+    closed_at: null,
+    head: { sha: sha("a") },
+    ...overrides,
+  };
+}
+
+async function startItems(options: {
+  events?: Record<string, Row[]>;
+  children?: Record<string, Child[]>;
+  api?: (call: TeaCall) => TeaReply | undefined;
+} = {}) {
+  const events = new Map(Object.entries(options.events ?? {}));
+  const children = new Map(Object.entries(options.children ?? {}));
+  const pulls = new Map<number, Record<string, unknown>>();
+  const statuses = new Map<string, string>();
+  const issues = new Set<number>();
+  const gitea = { pulls, statuses, issues, failing: new Set<number>() };
+  const { host, calls } = await start(
+    (call) => {
+      const custom = options.api?.(call);
+      if (custom) return custom;
+      const path = call.endpoint.split("?")[0]!;
+      const one = path.match(/\/repos\/acme\/widgets\/pulls\/(\d+)$/);
+      if (one) {
+        const number = Number(one[1]);
+        if (gitea.failing.has(number)) return { status: 500 };
+        const found = pulls.get(number);
+        return found ? { json: found } : { status: 404 };
+      }
+      const status = path.match(/\/repos\/acme\/widgets\/commits\/([0-9a-f]+)\/status$/);
+      if (status)
+        return { json: { state: statuses.get(status[1]!) ?? "pending", total_count: 1 } };
+      const issue = path.match(/\/repos\/acme\/widgets\/issues\/(\d+)$/);
+      if (issue) {
+        const number = Number(issue[1]);
+        if (pulls.has(number)) return { json: { number, pull_request: { merged: false } } };
+        return issues.has(number) ? { json: { number } } : { status: 404 };
+      }
+      return { json: [] };
+    },
+    {
+      threads: {
+        events: {
+          list: async ({ threadId, afterSeq, limit }) => {
+            if (Number(limit ?? 100) > 100) throw new Error("HTTP 400: Thread event limit cannot exceed 100");
+            return (events.get(threadId) ?? [])
+              .filter((row) => row.seq > Number(afterSeq ?? 0))
+              .slice(0, Number(limit ?? 100))
+              .map((row) => ({ id: `event-${row.seq}`, threadId, scope: { kind: "thread" }, ...row }));
+          },
+        },
+        get: async ({ threadId }: { threadId: string }) => {
+          if (threadId === "thr-gone") throw Object.assign(new Error("not found"), { code: "thread_not_found" });
+          return makeThreadResponse({ id: threadId });
+        },
+        list: async (args) =>
+          (children.get(args?.parentThreadId ?? "") ?? [])
+            .filter((child) => Boolean(child.archived) === Boolean(args?.archived))
+            .map((child) => ({ id: child.id, title: child.title, titleFallback: null })),
+      },
+    },
+  );
+  return { host, calls, events, children, gitea };
+}
+
+async function view(host: Host, threadId: string) {
+  return giteaRpcContract.threadItems.output.parse(
+    await host.harness.behavior.callRpc("threadItems", { threadId }),
+  );
+}
+
+function shown(items: Awaited<ReturnType<typeof view>>) {
+  return items.pulls.map((entry) => ({
+    ref: `${entry.repo}#${entry.number}`,
+    state: entry.state?.lifecycle.state ?? "checking",
+    links: entry.links.map((link) => `${link.own ? "" : `${link.threadTitle}:`}${link.source}`),
+  }));
+}
+
+async function idle(host: Host, id: string) {
+  return host.harness.behavior.emitThreadEvent("thread.idle", {
+    thread: makeThreadResponse({ id }),
+    lastAssistantText: "",
+  });
+}
+
+function eventReads(host: Host) {
+  return host.harness.sdk
+    .callsTo("threads.events.list")
+    .map(([args]) => args as { threadId: string; afterSeq: string });
+}
+
+function signals(host: Host) {
+  return host.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "thread-items-changed").length;
+}
+
+const realNow = () => performance.now();
+/** Retries `check` until it stops throwing, in real time, while tea child processes answer. */
+async function eventually(check: () => Promise<void> | void) {
+  const deadline = realNow() + 30_000;
+  for (;;) {
+    try {
+      return await check();
+    } catch (error) {
+      if (realNow() > deadline) throw error;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+}
+
+const pullReads = (calls: TeaCall[]) => calls.filter((call) => /\/pulls\/\d+$/.test(call.endpoint)).length;
+
+function runSweeps(host: Host) {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now: t0 + 10 * minute });
+  const service = host.harness.behavior.runService("thread-items");
+  cleanups.push(() => {
+    service.controller.abort();
+    return service.done;
+  });
+  return service;
+}
+
+it("links the pull requests a thread opened and pushed to when it goes idle", async () => {
+  const { host, calls } = await startItems({
+    events: { "thr-a": [...create(1, t0, 9), ...push(3, t0 + minute, 10)] },
+  });
+  await idle(host, "thr-a");
+  const items = await view(host, "thr-a");
+  expect(shown(items)).toEqual([
+    { ref: "acme/widgets#10", state: "checking", links: ["pushed"] },
+    { ref: "acme/widgets#9", state: "checking", links: ["opened"] },
+  ]);
+  expect(items).toMatchObject({ server, scanning: false, summary: { total: 2, checking: 2 } });
+  expect(items.pulls[1]!.url).toBe(url(9));
+  expect(signals(host)).toBe(1);
+  expect(calls).toEqual([]);
+});
+
+it("reads each thread event once from its cursor and rescans from the start on request", async () => {
+  const { host, events } = await startItems({ events: { "thr-a": create(1, t0, 9) } });
+  await idle(host, "thr-a");
+  events.set("thr-a", [...events.get("thr-a")!, ...push(3, t0 + minute, 9)]);
+  await idle(host, "thr-a");
+  expect(eventReads(host).map((args) => args.afterSeq)).toEqual(["0", "2"]);
+  const cli = await host.harness.behavior.runCli(["thread", "thr-a", "--scan"]);
+  expect(cli).toMatchObject({ exitCode: 0 });
+  expect(eventReads(host).map((args) => args.afterSeq).slice(2)).toEqual(["0"]);
+  expect(shown(await view(host, "thr-a"))).toEqual([
+    { ref: "acme/widgets#9", state: "checking", links: ["opened"] },
+  ]);
+});
+
+it("keeps each page's links and cursor together when a later page fails", async () => {
+  const rows = [...create(1, t0, 9), ...filler(3, 98), ...push(101, t0 + minute, 10)];
+  const { host } = await startItems({ events: { "thr-a": rows } });
+  let reads = 0;
+  host.harness.sdk.stub("threads.events.list", async ({ afterSeq }: { afterSeq: string }) => {
+    reads += 1;
+    if (afterSeq !== "0") throw new Error("bb restarted");
+    return rows.slice(0, 100).map((row) => ({ id: `event-${row.seq}`, threadId: "thr-a", scope: { kind: "thread" }, ...row }));
+  });
+  const first = await idle(host, "thr-a");
+  expect(first.errors).toEqual([]);
+  expect(reads).toBe(2);
+  host.harness.sdk.stub("threads.events.list", async ({ afterSeq }: { afterSeq: string }) =>
+    rows.filter((row) => row.seq > Number(afterSeq)).map((row) => ({ id: `event-${row.seq}`, threadId: "thr-a", scope: { kind: "thread" }, ...row })),
+  );
+  await idle(host, "thr-a");
+  expect(host.harness.sdk.callsTo("threads.events.list").map(([args]) => (args as { afterSeq: string }).afterSeq).at(-1)).toBe("100");
+  expect(shown(await view(host, "thr-a")).map((entry) => entry.ref)).toEqual(["acme/widgets#10", "acme/widgets#9"]);
+});
+
+it("backfills an old thread on its first view and says so until the history is read", async () => {
+  const rows = [...create(1, t0, 9), ...filler(3, 700), ...push(703, t0 + minute, 10)];
+  const { host } = await startItems({ events: { "thr-a": rows } });
+  expect((await view(host, "thr-a")).scanning).toBe(true);
+  await eventually(() => expect(signals(host)).toBeGreaterThanOrEqual(3));
+  const done = await view(host, "thr-a");
+  expect(done.scanning).toBe(false);
+  expect(shown(done).map((entry) => entry.ref)).toEqual(["acme/widgets#10", "acme/widgets#9"]);
+  expect(eventReads(host).map((args) => args.afterSeq)).toEqual(["0", "100", "200", "300", "400", "500", "600", "700"]);
+});
+
+it("asks bb for a thread's events on a view only when its last scan is 30 seconds old, and at once when it goes idle", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], now: t0 });
+  const { host, events } = await startItems({ events: { "thr-a": create(1, t0, 9) } });
+  const reads = () => eventReads(host).map((args) => args.afterSeq);
+  await view(host, "thr-a");
+  await view(host, "thr-a");
+  expect(reads()).toEqual(["0"]);
+  events.set("thr-a", [...events.get("thr-a")!, ...push(3, t0, 10)]);
+  vi.setSystemTime(t0 + 29_000);
+  expect(shown(await view(host, "thr-a")).map((entry) => entry.ref)).toEqual(["acme/widgets#9"]);
+  expect(reads()).toEqual(["0"]);
+  vi.setSystemTime(t0 + 30_000);
+  expect(shown(await view(host, "thr-a")).map((entry) => entry.ref)).toEqual(["acme/widgets#10", "acme/widgets#9"]);
+  expect(reads()).toEqual(["0", "2"]);
+  events.set("thr-a", [...events.get("thr-a")!, ...push(5, t0, 11)]);
+  await idle(host, "thr-a");
+  expect(reads()).toEqual(["0", "2", "4"]);
+  await view(host, "thr-a");
+  expect(reads()).toEqual(["0", "2", "4"]);
+});
+
+it("includes pull requests of child and grandchild threads once, without looping on cycles", async () => {
+  const { host } = await startItems({
+    events: {
+      root: push(1, t0, 9),
+      child: [...push(1, t0 + minute, 9), ...create(3, t0 + minute, 11)],
+      grandchild: push(1, t0 + 2 * minute, 12),
+      archived: push(1, t0, 13),
+    },
+    children: {
+      root: [{ id: "child", title: "Fix CI" }, { id: "archived", title: "Old", archived: true }],
+      child: [{ id: "grandchild", title: "Deploy" }],
+      grandchild: [{ id: "root", title: "Root again" }],
+    },
+  });
+  const items = await view(host, "root");
+  expect(shown(items)).toEqual([
+    { ref: "acme/widgets#12", state: "checking", links: ["Deploy:pushed"] },
+    { ref: "acme/widgets#11", state: "checking", links: ["Fix CI:opened"] },
+    { ref: "acme/widgets#9", state: "checking", links: ["Fix CI:pushed", "pushed"] },
+    { ref: "acme/widgets#13", state: "checking", links: ["Old:pushed"] },
+  ]);
+  expect(items.descendantsTruncated).toBe(false);
+  expect(items.pulls.map((entry) => entry.via)).toEqual([
+    { type: "child", threadId: "grandchild", threadTitle: "Deploy" },
+    { type: "child", threadId: "child", threadTitle: "Fix CI" },
+    { type: "own", source: "pushed" },
+    { type: "child", threadId: "archived", threadTitle: "Old" },
+  ]);
+  expect(shown(await view(host, "child")).map((entry) => entry.ref)).toEqual([
+    "acme/widgets#12", "acme/widgets#11", "acme/widgets#9", "acme/widgets#13",
+  ]);
+});
+
+it("reads at most 50 threads of a tree and says the rest were left out", async () => {
+  const children = Array.from({ length: 60 }, (_, index) => ({ id: `child-${index}`, title: `Child ${index}` }));
+  const { host } = await startItems({ children: { root: children } });
+  const items = await view(host, "root");
+  expect(items.descendantsTruncated).toBe(true);
+  expect(new Set(eventReads(host).map((args) => args.threadId)).size).toBe(50);
+});
+
+it("keeps a thread's links when it is archived or deleted and forgets only the deleted thread's cursor", async () => {
+  const { host } = await startItems({ events: { "thr-a": push(1, t0, 9) } });
+  await idle(host, "thr-a");
+  const before = shown(await view(host, "thr-a"));
+  expect(before).toEqual([{ ref: "acme/widgets#9", state: "checking", links: ["pushed"] }]);
+  await host.harness.behavior.emitThreadEvent("thread.archived", { thread: makeThreadResponse({ id: "thr-a", archivedAt: 1 }) });
+  expect(shown(await view(host, "thr-a"))).toEqual(before);
+  expect(eventReads(host).map((args) => args.afterSeq)).toEqual(["0"]);
+  await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "thr-a", deletedAt: 1 }) });
+  expect(shown(await view(host, "thr-a"))).toEqual(before);
+  expect(eventReads(host).map((args) => args.afterSeq)).toEqual(["0", "0"]);
+});
+
+
+it("rescans from the start after a scan already in flight, even when another starts meanwhile", async () => {
+  const rows = create(1, t0, 9);
+  const { host } = await startItems({ events: { "thr-a": rows } });
+  await idle(host, "thr-a");
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  host.harness.sdk.stub("threads.events.list", async ({ afterSeq }: { afterSeq: string }) => {
+    if (afterSeq !== "0") await held;
+    return rows.filter((row) => row.seq > Number(afterSeq)).map((row) => ({ id: `event-${row.seq}`, threadId: "thr-a", scope: { kind: "thread" }, ...row }));
+  });
+  const inFlight = idle(host, "thr-a");
+  await eventually(() => expect(eventReads(host).map((args) => args.afterSeq)).toEqual(["0", "2"]));
+  const rescan = host.harness.behavior.runCli(["thread", "thr-a", "--scan"]);
+  const another = idle(host, "thr-a");
+  release();
+  await Promise.all([inFlight, another]);
+  expect(await rescan).toMatchObject({ exitCode: 0, stdout: "checking  acme/widgets#9  (opened)" });
+  const reads = eventReads(host).map((args) => args.afterSeq);
+  expect(reads.slice(0, 2)).toEqual(["0", "2"]);
+  expect(reads.slice(2)).toContain("0");
+});
+
+it("shows a pull request's state once the refresher reads it, and the error of one it cannot read", { timeout: 60_000 }, async () => {
+  const { host, calls, gitea } = await startItems({
+    events: { "thr-a": [...create(1, t0, 9, 8), ...push(3, t0 + minute, 9)] },
+  });
+  gitea.pulls.set(9, pull(9, { created_at: new Date(t0 - 1_000).toISOString() }));
+  gitea.statuses.set(sha("a"), "success");
+  runSweeps(host);
+  await idle(host, "thr-a");
+  await eventually(async () => {
+    const items = await view(host, "thr-a");
+    expect(items.pulls.map(({ number, via, error, state }) => ({ number, via, error, state: state?.lifecycle.state ?? null }))).toEqual([
+      { number: 8, via: { type: "own", source: "opened" }, error: expect.stringContaining("404"), state: null },
+      { number: 9, via: { type: "own", source: "opened" }, error: null, state: "open" },
+    ]);
+    expect(items.summary).toMatchObject({ total: 2, open: 1, unreadable: 1, checking: 0 });
+  });
+  expect(pullReads(calls)).toBeGreaterThanOrEqual(2);
+  expect(calls.every((call) => call.method === "GET")).toBe(true);
+});
+
+it("copies the old kv link stores into the table, keeps the keys, and marks the import done only when every key was read", { timeout: 60_000 }, async () => {
+  let orphanReadable = false;
+  const { host, calls } = await startItems({
+    api: ({ endpoint }) => {
+      if (endpoint.endsWith("/issues/9")) return { json: { number: 9, pull_request: { merged: false } } };
+      if (endpoint.endsWith("/issues/50")) return orphanReadable ? { json: { number: 50 } } : { status: 500 };
+      return undefined;
+    },
+  });
+  const account = '["https://gitea.example/prefix/","work","dev"]';
+  const sent = { repo: "acme/widgets", number: 42, kind: "pr", threadId: "thread-1", createdAt: "2026-10-12T12:00:00.000Z" };
+  const { kv } = host.bb.storage;
+  const legacy: Record<string, unknown> = {
+    [`link:${account}:pr:acme/widgets#42`]: [sent],
+    "thread-link:thread-1": { repo: "acme/widgets", number: 42, kind: "pr" },
+    "thread-link:fixer-1": [{ repo: "acme/widgets", number: 43, kind: "pr" }],
+    "auto-fixer-thread:fixer-1": { repo: "acme/widgets", number: 43 },
+    "thread-link:multi": [{ repo: "acme/widgets", number: 44, kind: "pr" }, { repo: "acme/widgets", number: 7, kind: "issue" }],
+    "thread-link:broken": "acme/widgets#45",
+    "thread:acme/widgets#42": "thread-1",
+    "thread:Acme/Widgets:9": "legacy-9",
+    "thread:acme/widgets#50": "legacy-50",
+  };
+  for (const [key, value] of Object.entries(legacy)) await kv.set(key, value);
+  await kv.delete(importedKey);
+  const restarted = await host.harness.lifecycle.reload(plugin);
+  cleanups.push(() => restarted.harness.lifecycle.dispose());
+
+  const links = await restarted.harness.behavior.callRpc("listLinks", null);
+  expect(links).toEqual({ account, links: { "pr:acme/widgets#42": [sent] } });
+  expect(shown(await view(restarted, "thread-1"))).toEqual([{ ref: "acme/widgets#42", state: "checking", links: ["sent"] }]);
+  expect(shown(await view(restarted, "fixer-1"))).toEqual([{ ref: "acme/widgets#43", state: "checking", links: ["auto-fixer"] }]);
+  const multi = await view(restarted, "multi");
+  expect(shown(multi)).toEqual([{ ref: "acme/widgets#44", state: "checking", links: ["sent"] }]);
+  expect([multi.pulls[0]!.links[0]!.linkedAt, multi.issues]).toEqual([
+    0,
+    [{ repo: "acme/widgets", number: 7, url: `${server}acme/widgets/issues/7`, source: "sent", linkedAt: 0 }],
+  ]);
+  expect(shown(await view(restarted, "legacy-9"))).toEqual([{ ref: "Acme/Widgets#9", state: "checking", links: ["sent"] }]);
+  expect(restarted.harness.inspection.logEntries.map((entry) => entry.message)).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining("thread-link:broken"),
+      expect.stringContaining("thread:acme/widgets#50"),
+    ]),
+  );
+  const kept = async (target: Host) => Object.fromEntries(
+    await Promise.all(Object.keys(legacy).map(async (key) => [key, await target.bb.storage.kv.get(key)])),
+  );
+  expect(await kept(restarted)).toEqual(legacy);
+  expect(await restarted.bb.storage.kv.get(importedKey)).toBeUndefined();
+  const kindReads = () => calls.filter((call) => /\/issues\/\d+$/.test(call.endpoint)).map((call) => call.endpoint);
+  expect(kindReads().sort()).toEqual(["/api/v1/repos/Acme/Widgets/issues/9", "/api/v1/repos/acme/widgets/issues/50"]);
+
+  orphanReadable = true;
+  const again = await restarted.harness.lifecycle.reload(plugin);
+  cleanups.push(() => again.harness.lifecycle.dispose());
+  expect(kindReads().slice(2).sort()).toEqual(["/api/v1/repos/Acme/Widgets/issues/9", "/api/v1/repos/acme/widgets/issues/50"]);
+  expect(await again.bb.storage.kv.get(importedKey)).toEqual(expect.any(Number));
+  expect((await view(again, "legacy-50")).issues.map((issue) => issue.number)).toEqual([50]);
+  expect(await again.harness.behavior.callRpc("listLinks", null)).toEqual(links);
+
+  const last = await again.harness.lifecycle.reload(plugin);
+  cleanups.push(() => last.harness.lifecycle.dispose());
+  expect(kindReads()).toHaveLength(4);
+  expect(await kept(last)).toEqual(legacy);
+});
+
+it("links, lists, and unlinks issues and pull requests from the CLI for this thread or another", async () => {
+  const { host, calls, gitea } = await startItems();
+  gitea.pulls.set(9, pull(9, { state: "closed", merged: true, merged_at: "2026-11-16T13:00:00Z" }));
+  gitea.pulls.set(10, pull(10));
+  gitea.issues.add(4);
+  gitea.statuses.set(sha("a"), "success");
+  const cli = (argv: string[], threadId?: string) =>
+    host.harness.behavior.runCli(argv, threadId ? { threadId } : {});
+
+  await expect(cli(["link", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Linked pr acme/widgets#9 to thr-a." });
+  expect(calls.map((call) => call.endpoint)).toEqual(["/api/v1/repos/acme/widgets/pulls/9"]);
+  await expect(cli(["link", url(10), "--thread", "thr-b"])).resolves.toMatchObject({ exitCode: 0, stdout: "Linked pr acme/widgets#10 to thr-b." });
+  await expect(cli(["link", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "pr acme/widgets#9 was already linked to thr-a." });
+  await expect(cli(["link", "issue", "acme/widgets", "4"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Linked issue acme/widgets#4 to thr-a." });
+  await expect(cli(["link", `${server}acme/widgets/issues/4`], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "issue acme/widgets#4 was already linked to thr-a." });
+  await expect(cli(["link", "issue", "acme/widgets", "10"], "thr-a")).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("is a pull request; link it as pr") });
+  await expect(cli(["link", "pr", "acme/widgets", "9"])).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("--thread") });
+  await expect(cli(["link", "pr", "acme/widgets", "9", "--thread", "thr-gone"])).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("BB thread thr-gone was not found.") });
+  await expect(cli(["thread"])).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("--thread") });
+  await expect(cli(["link", "pr", "acme/widgets", "77"], "thr-a")).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("acme/widgets#77") });
+  await expect(cli(["link", "https://other.example/acme/widgets/pulls/9"], "thr-a")).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringContaining("is not an issue or pull request on") });
+
+  const reads = calls.length;
+  await expect(cli(["thread"], "thr-a")).resolves.toMatchObject({
+    exitCode: 0,
+    stdout: "merged    acme/widgets#9  Change 9  (linked)\nissue     acme/widgets#4  (linked)",
+  });
+  const json = await cli(["thread", "thr-b", "--json"]);
+  expect(giteaRpcContract.threadItems.output.parse(JSON.parse(json.stdout ?? "")).pulls[0]).toMatchObject({
+    number: 10,
+    state: { lifecycle: { state: "open", ci: "passing" } },
+    via: { type: "own", source: "linked" },
+  });
+  expect(calls).toHaveLength(reads);
+  const badges = giteaRpcContract.listLinks.output.parse(await host.harness.behavior.callRpc("listLinks", null));
+  expect(Object.fromEntries(Object.entries(badges.links).map(([key, entries]) => [key, entries.map((entry) => entry.threadId)]))).toEqual({
+    "pr:acme/widgets#9": ["thr-a"],
+    "pr:acme/widgets#10": ["thr-b"],
+    "issue:acme/widgets#4": ["thr-a"],
+  });
+
+  const badgeSignals = () => host.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "links-changed").length;
+  const before = badgeSignals();
+  await expect(cli(["unlink", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Unlinked pr acme/widgets#9 from thr-a." });
+  expect(badgeSignals()).toBe(before + 1);
+  await expect(cli(["unlink", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "pr acme/widgets#9 was not linked to thr-a." });
+  await expect(cli(["unlink", "pr", "acme/widgets", "4"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "pr acme/widgets#4 was not linked to thr-a." });
+  await expect(cli(["unlink", `${server}acme/widgets/issues/4`], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Unlinked issue acme/widgets#4 from thr-a." });
+  await expect(cli(["thread"], "thr-a")).resolves.toMatchObject({ stdout: "No Gitea pull requests are linked to this thread." });
+});
