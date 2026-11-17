@@ -29,10 +29,12 @@ import { GiteaThreadPanel } from "./thread-items-panel.js";
 import {
   giteaTab,
   PullsCardRows,
+  PullsRowBadge,
   PullsSegment,
   pullCountAction,
   usePullCounts,
   usePullsSegmentVisible,
+  useRowPulls,
 } from "./thread-pulls.js";
 import { issueReferences } from "./issue-references.js";
 import { autoFixerExecutionSchema } from "./execution.js";
@@ -3267,6 +3269,12 @@ export default definePluginApp((app) => {
     group: experimental_THREAD_INFO_ROW_GROUPS.pullRequest,
     order: 20,
     component: PullsCardRows,
+  });
+  app.slots.experimental_threadRowMetadata({
+    id: "pulls",
+    order: 20,
+    useData: useRowPulls,
+    component: PullsRowBadge,
   });
   app.slots.experimental_appOverlay({
     id: "display-scope",

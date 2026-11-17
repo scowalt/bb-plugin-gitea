@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import {
   experimental_ThreadContextCardRow as ThreadContextCardRow,
   experimental_useAppPanel,
@@ -8,6 +7,8 @@ import {
   type ExperimentalThreadContextCardProps,
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
+  type ExperimentalThreadRowMetadataDataInput,
+  type ExperimentalThreadRowMetadataProps,
   type PluginThreadAction,
   type PluginThreadActionDataInput,
   type PluginThreadActionItemInput,
@@ -26,14 +27,17 @@ export const giteaTab = { id: "item", context: { kind: "thread" }, availability:
 
 export const openGiteaTab = (panel: ExperimentalPanelController) => panel.openTab({ tab: giteaTab });
 
-/** One keyed read for every thread a thread pane shows; watching it keeps those threads' pull requests fresh. */
-export function useThreadPulls(threadIds: readonly string[]): ThreadPullsById {
-  const keys = useMemo(() => [...new Set(threadIds)], [threadIds]);
+/**
+ * One keyed read for many threads. Watching `threadPulls` keeps the threads'
+ * pull requests fresh, so thread panes read it; `threadPullBadges` reads only
+ * what is stored, for lists of many threads.
+ */
+function usePullsOf(method: "threadPulls" | "threadPullBadges", threadIds: readonly string[]): ThreadPullsById {
   return experimental_useRpcKeyedQuery({
     contract: threadPullsReadContract,
-    method: "threadPulls",
-    keys,
-    enabled: keys.length > 0,
+    method,
+    keys: threadIds,
+    enabled: threadIds.length > 0,
   }).data;
 }
 
@@ -58,15 +62,15 @@ function breakdown(summary: ThreadItemsSummary): string {
 }
 
 /** How the thread's pull requests stand, worst first: CI failing, CI running, all merged, or otherwise. */
-function standing(summary: ThreadItemsSummary): { icon: string; note: string | null } {
-  if (summary.ciFailing > 0) return { icon: "X", note: `${summary.ciFailing} failing` };
-  if (summary.ciRunning > 0) return { icon: "Clock", note: "CI running" };
+function standing(summary: ThreadItemsSummary): Pick<ChipSpec, "icon" | "tone"> & { note: string | null } {
+  if (summary.ciFailing > 0) return { icon: "X", tone: "red", note: `${summary.ciFailing} failing` };
+  if (summary.ciRunning > 0) return { icon: "Clock", tone: "amber", note: "CI running" };
   if (summary.merged === summary.total)
-    return { icon: "GitMerge", note: summary.total === 1 ? "merged" : "all merged" };
-  return { icon: "GitPullRequest", note: summary.merged > 0 ? `${summary.merged} merged` : null };
+    return { icon: "GitMerge", tone: "purple", note: summary.total === 1 ? "merged" : "all merged" };
+  return { icon: "GitPullRequest", tone: "green", note: summary.merged > 0 ? `${summary.merged} merged` : null };
 }
 
-export const usePullCounts = ({ threadIds }: PluginThreadActionDataInput) => useThreadPulls(threadIds);
+export const usePullCounts = ({ threadIds }: PluginThreadActionDataInput) => usePullsOf("threadPulls", threadIds);
 
 /** The thread header's pull request count; hidden until the thread has one. */
 export function pullCountAction({
@@ -85,12 +89,12 @@ export function pullCountAction({
 }
 
 /** How many pull requests the context row and card show before collapsing the rest to "+N". */
-export const shownPulls = 3;
+const shownPulls = 3;
 
 const checkingChip: ChipSpec = { label: "Checking", tone: "muted", icon: "Clock", title: "Not read from Gitea yet" };
 
 /** A pull request's state as one chip: its CI while open, otherwise merged or closed. */
-export function pullChip(pull: ThreadPull): ChipSpec {
+function pullChip(pull: ThreadPull): ChipSpec {
   if (!pull.state)
     return pull.error === null
       ? checkingChip
@@ -99,19 +103,19 @@ export function pullChip(pull: ThreadPull): ChipSpec {
   return lifecycle.state === "open" ? chipFor(ciChips, lifecycle.ci) : lifecycleChips[lifecycle.state];
 }
 
-export function describePull(pull: ThreadPull): string {
+function describePull(pull: ThreadPull): string {
   const title = pull.state ? ` · ${pull.state.title}` : "";
   return `${pull.repo}#${pull.number}${title} · ${pullChip(pull).label}`;
 }
 
 /** Pull requests that can still change first, then merged and closed ones; newest linked first within each. */
-export function byAttention(pulls: readonly ThreadPull[]): ThreadPull[] {
+function byAttention(pulls: readonly ThreadPull[]): ThreadPull[] {
   const settled = (pull: ThreadPull) => pull.state !== null && pull.state.lifecycle.state !== "open";
   return [...pulls.filter((pull) => !settled(pull)), ...pulls.filter(settled)];
 }
 
 function useOwnPulls(threadId: string | null): ThreadPull[] {
-  const rows = useThreadPulls(threadId === null ? [] : [threadId]);
+  const rows = usePullsOf("threadPulls", threadId === null ? [] : [threadId]);
   return (threadId === null ? undefined : rows?.[threadId]?.pulls) ?? [];
 }
 
@@ -131,12 +135,13 @@ export function PullsSegment({ threadId }: ExperimentalThreadContextSegmentProps
     <span className="flex min-w-0 items-center gap-1 text-xs">
       {pulls.slice(0, shownPulls).map((pull) => {
         const chip = pullChip(pull);
+        const description = describePull(pull);
         return (
           <button
             key={`${pull.repo}#${pull.number}`}
             type="button"
-            title={describePull(pull)}
-            aria-label={describePull(pull)}
+            title={description}
+            aria-label={description}
             onClick={open}
             className={cn(
               "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 font-medium tabular-nums hover:opacity-80",
@@ -187,5 +192,27 @@ export function PullsCardRows({ threadId }: ExperimentalThreadContextCardProps) 
         />
       )}
     </>
+  );
+}
+
+export const useRowPulls = ({ threads }: ExperimentalThreadRowMetadataDataInput) =>
+  usePullsOf("threadPullBadges", threads.map((thread) => thread.id));
+
+/** The sidebar row's badge: how many pull requests the thread has, in the colour of how they stand. */
+export function PullsRowBadge({ thread, data }: ExperimentalThreadRowMetadataProps<ThreadPullsById>) {
+  const pulls = data?.[thread.id];
+  if (!pulls || pulls.summary.total === 0) return null;
+  const { icon, tone } = standing(pulls.summary);
+  const summary = breakdown(pulls.summary);
+  return (
+    <span
+      role="img"
+      aria-label={summary}
+      title={[summary, ...byAttention(pulls.pulls).map(describePull)].join("\n")}
+      className={cn("inline-flex shrink-0 items-center gap-0.5 rounded-full px-1 text-xs leading-3.5 tabular-nums", toneClasses[tone])}
+    >
+      <Icon name={icon} className="size-3" />
+      {pulls.summary.total}
+    </span>
   );
 }

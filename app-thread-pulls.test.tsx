@@ -6,6 +6,7 @@ import {
   experimental_useAppPanel,
   useBbNavigate,
   useSdk,
+  type PluginSidebarThread,
   type PluginThreadActionTarget,
 } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot, type RenderSlotOptions } from "@get-bb/plugin-sdk/testing/app";
@@ -47,20 +48,20 @@ const row = (...pulls: ThreadPull[]): ThreadPulls => ({ pulls, summary: summariz
 
 type Rows = Record<string, ThreadPulls>;
 
-/** Serves the keyed read from `rows` and counts its requests. */
+/** Serves both keyed reads from `rows` and records the keys of each request, by method. */
 function keyed(rows: Rows) {
   const requests: string[][] = [];
+  const badgeRequests: string[][] = [];
+  const serve = (log: string[][]) => ({ keys }: { keys: string[] }) => {
+    log.push([...keys]);
+    return Object.fromEntries(keys.map((key) => [key, rows[key] ?? row()]));
+  };
   const options: RenderSlotOptions<typeof threadPullsReadContract> = {
     experimental_rpcContract: threadPullsReadContract,
-    rpc: {
-      threadPulls: ({ keys }) => {
-        requests.push([...keys]);
-        return Object.fromEntries(keys.map((key) => [key, rows[key] ?? row()]));
-      },
-    },
+    rpc: { threadPulls: serve(requests), threadPullBadges: serve(badgeRequests) },
     experimental_panel: { openTab: () => true },
   };
-  return { requests, options };
+  return { requests, badgeRequests, options };
 }
 
 function target(id: string): PluginThreadActionTarget {
@@ -246,4 +247,90 @@ it("draws no card row while the thread has no pull request", async () => {
   await act(async () => {});
   expect(requests).toEqual([["thr_a"]]);
   expect(slot.container.textContent).toBe("");
+});
+
+const rowMetadata = app.threadRowMetadata.find((registration) => registration.id === "pulls")!;
+
+function sidebarThread(id: string): PluginSidebarThread {
+  return {
+    id,
+    projectId: "proj_a",
+    title: id,
+    titleFallback: null,
+    displayTitle: id,
+    parentThreadId: null,
+    parentNotifications: "auto",
+    lifecycleOwnerThreadId: null,
+    sourceThreadId: null,
+    sectionId: null,
+    originKind: null,
+    originPluginId: null,
+    providerId: "pi",
+    status: "idle",
+    runtimeStatus: "idle",
+    queuedWork: "none",
+    hasPendingInteraction: false,
+    activity: { workflows: 0, backgroundAgents: 0, backgroundCommands: 0, planMode: 0 },
+    indicator: "none",
+    indicatorLabel: null,
+    isUnread: false,
+    isPinned: false,
+    pinnedAt: null,
+    pinSortKey: null,
+    isArchived: false,
+    archivedAt: null,
+    href: `/projects/proj_a/threads/${id}`,
+    isHidden: false,
+    environment: null,
+    host: null,
+    createdAt: 1,
+    updatedAt: 1,
+    lastReadAt: 1,
+    latestAttentionAt: 1,
+  };
+}
+
+/** Draws the badges the way bb's sidebar does: one useData for every listed thread, one item per row. */
+function Sidebar({ threadIds }: { threadIds: string[] }) {
+  const threads = threadIds.map(sidebarThread);
+  const data = rowMetadata.useData?.({ threads });
+  const Badge = rowMetadata.component;
+  return (
+    <ul>
+      {threads.map((thread) => (
+        <li key={thread.id} data-testid={thread.id}>
+          <Badge thread={thread} data={data} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+it("badges every sidebar row from one keyed read of the stored pull requests, without watching them", async () => {
+  const rows: Rows = {
+    thr_failing: five,
+    thr_running: row(pull(1, running), pull(2, merged)),
+    thr_merged: row(pull(1, merged)),
+    thr_ok: row(pull(1, passing)),
+  };
+  const { requests, badgeRequests, options } = keyed(rows);
+  renderSlot({ component: Sidebar }, { threadIds: [...Object.keys(rows), "thr_none"] }, options);
+  const failingBadge = await screen.findByRole("img", { name: "Gitea pull requests: 2 open, 1 merged, 1 closed, 1 checking, 1 with failing CI" });
+  expect(failingBadge.textContent).toBe("5");
+  expect(failingBadge.className).toContain("bg-red-500/15");
+  expect(failingBadge.title.split("\n")).toEqual([
+    "Gitea pull requests: 2 open, 1 merged, 1 closed, 1 checking, 1 with failing CI",
+    "acme/ops#4 · Change 4 · 1 failing",
+    "acme/ops#2 · Checking",
+    "acme/camp#1 · Change 1 · Passing",
+    "acme/ops#5 · Change 5 · Merged",
+    "acme/ops#3 · Change 3 · Closed",
+  ]);
+  const badge = (id: string) => screen.getByTestId(id).querySelector("[role=img]");
+  expect(badge("thr_running")!.className).toContain("bg-yellow-500/15");
+  expect(badge("thr_merged")!.className).toContain("bg-purple-500/15");
+  expect(badge("thr_ok")!.className).toContain("bg-green-500/15");
+  expect(screen.getByTestId("thr_none").textContent).toBe("");
+  expect(badgeRequests.map((keys) => keys.sort())).toEqual([[...Object.keys(rows), "thr_none"].sort()]);
+  expect(requests).toEqual([]);
 });

@@ -13,6 +13,7 @@ import type {
   threadItemsRpcMethods,
 } from "./contract.js";
 import { threadPullsKeyTag, threadPullsTag, type threadPullsRpcMethods } from "./read-contract.js";
+import { createAncestry } from "./ancestry.js";
 import { importLegacy } from "./legacy-import.js";
 import { canChange, readPull, summarize, type PullFacts } from "./pull-state.js";
 import { createRefresher } from "./refresher.js";
@@ -51,7 +52,7 @@ const treeTtlMs = 30_000;
 const watchEveryMs = 30_000;
 const changed = "thread-items-changed";
 
-type Tree = { threads: { id: string; title: string | null }[]; truncated: boolean };
+type Tree = { threads: string[]; truncated: boolean };
 type PullRows = [StoredLink, ...StoredLink[]];
 
 const message = (error: unknown) =>
@@ -95,6 +96,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   });
 
   const trees = new Map<string, { at: number; tree: Promise<Tree> }>();
+  const ancestry = createAncestry({ threads: bb.sdk.threads, log: bb.log, maxDepth, ttlMs: treeTtlMs });
 
   async function children(threadId: string) {
     const lists = await Promise.all(
@@ -102,20 +104,18 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
         bb.sdk.threads.list({ parentThreadId: threadId, includeHidden: true, archived }),
       ),
     );
-    return lists.flat().map((thread) => ({
-      id: thread.id,
-      title: thread.title ?? thread.titleFallback ?? null,
-    }));
+    return lists.flat().map((thread) => thread.id);
   }
 
+  /** The thread and its child threads to scan for commands. */
   async function walk(root: string): Promise<Tree> {
-    const threads = new Map<string, string | null>([[root, null]]);
+    const threads = new Set([root]);
     let truncated = false;
     let level = [root];
     for (let depth = 0; depth < maxDepth && level.length > 0; depth += 1) {
       const next: string[] = [];
       for (const parent of level) {
-        let found: { id: string; title: string | null }[];
+        let found: string[];
         try {
           found = await children(parent);
         } catch (error) {
@@ -124,21 +124,18 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
           continue;
         }
         for (const child of found) {
-          if (threads.has(child.id)) continue;
+          if (threads.has(child)) continue;
           if (threads.size >= maxThreads) {
             truncated = true;
             break;
           }
-          threads.set(child.id, child.title);
-          next.push(child.id);
+          threads.add(child);
+          next.push(child);
         }
       }
       level = next;
     }
-    return {
-      threads: [...threads].map(([id, title]) => ({ id, title })),
-      truncated,
-    };
+    return { threads: [...threads], truncated };
   }
 
   function treeOf(root: string): Promise<Tree> {
@@ -151,7 +148,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     return tree;
   }
 
-  function pullOf(server: string, root: string, titles: Map<string, string | null>, rows: PullRows): ThreadPull {
+  function pullOf(server: string, root: string, titles: ReadonlyMap<string, string | null>, rows: PullRows): ThreadPull {
     const [first] = rows;
     const own = rows.find((row) => row.threadId === root);
     return {
@@ -172,15 +169,16 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     };
   }
 
-  /** What the store holds for a thread and its child threads; reads no events and no Gitea. */
+  /**
+   * What the store holds for a thread and its child threads; reads no events
+   * and no Gitea. bb is asked only about linked threads and their ancestors.
+   */
   async function itemsOf(threadId: string) {
-    const tree = await treeOf(threadId);
-    const ids = tree.threads.map((thread) => thread.id);
     const server = gitea.server();
-    const titles = new Map(tree.threads.map((thread) => [thread.id, thread.title]));
+    const { below, titles } = await ancestry.of(store.linkedThreads(server));
     const byPull = new Map<string, PullRows>();
     const issues: ThreadIssue[] = [];
-    for (const row of store.linksOf(server, ids)) {
+    for (const row of store.linksOf(server, below.get(threadId) ?? [])) {
       if (row.kind === "issue") {
         if (row.threadId === threadId)
           issues.push({
@@ -199,12 +197,12 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       else byPull.set(key, [row]);
     }
     const pulls = [...byPull.values()].map((rows) => pullOf(server, threadId, titles, rows));
-    return { tree, server, pulls, issues };
+    return { server, pulls, issues };
   }
 
   async function view(threadId: string, { refresh = false } = {}): Promise<ThreadItemsView> {
     const tree = await treeOf(threadId);
-    const scanning = (await Promise.all(tree.threads.map((thread) => scanner.forRead(thread.id)))).some(Boolean);
+    const scanning = (await Promise.all(tree.threads.map((id) => scanner.forRead(id)))).some(Boolean);
     const { server, pulls, issues } = await itemsOf(threadId);
     const items = [...pulls, ...issues];
     if (refresh)
@@ -278,7 +276,14 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   const scanQuietly = (threadId: string) => scanner.toEnd(threadId);
   bb.events.on("thread.idle", ({ thread }) => scanQuietly(thread.id));
   bb.events.on("thread.failed", ({ thread }) => scanQuietly(thread.id));
-  bb.events.on("thread.deleted", ({ thread }) => scanner.forget(thread.id));
+  const treeChanged = (threadId: string) => {
+    if (ancestry.forget(threadId)) bb.rpc.experimental_invalidate([threadPullsTag]);
+  };
+  bb.events.on("experimental_thread.parentChanged", ({ thread }) => treeChanged(thread.id));
+  bb.events.on("thread.deleted", ({ thread }) => {
+    scanner.forget(thread.id);
+    treeChanged(thread.id);
+  });
 
   try {
     await importLegacy({ kv: bb.storage.kv, gitea, store, log: bb.log });
@@ -289,6 +294,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   const handlers = {
     threadItems: ({ threadId, refresh }) => view(threadId, { refresh }),
     threadPulls: ({ keys }) => threadPulls(keys),
+    threadPullBadges: ({ keys }) => threadPulls(keys),
     async linkItem({ threadId, repo, number, kind }): Promise<{ result: "added" | "already" }> {
       const server = gitea.server();
       const item = itemOf(repo, number);

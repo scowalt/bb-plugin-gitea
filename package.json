@@ -55,6 +55,7 @@
     "thread-items/index.ts",
     "thread-items/cli.ts",
     "thread-items/contract.ts",
+    "thread-items/ancestry.ts",
     "thread-items/detect.ts",
     "thread-items/legacy-import.ts",
     "thread-items/pull-state.ts",

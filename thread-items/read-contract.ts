@@ -21,6 +21,11 @@ export const threadPullsRpcMethods = {
     experimental_description:
       "Each thread's Gitea pull requests and its child threads', keyed by thread id. While a client watches a thread, its new commands are read and its open pull requests refresh every 30 seconds.",
   },
+  threadPullBadges: {
+    ...keyedRead,
+    experimental_description:
+      "The same rows as threadPulls, for lists of many threads: watching it reads no commands and refreshes nothing sooner.",
+  },
 };
 
 /** The keyed reads the app makes, apart from the server's full contract so the app bundle loads no server code. */

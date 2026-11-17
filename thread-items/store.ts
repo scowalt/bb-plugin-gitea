@@ -206,6 +206,7 @@ export function openStore(
       SELECT * FROM thread_items
       WHERE server = ? AND source IN ('sent', 'linked') AND account = ?
       ORDER BY linked_at, rowid`),
+    linkedThreads: db.prepare(`SELECT DISTINCT thread_id FROM thread_items WHERE server = ?`),
     latestStarted: db.prepare(`
       SELECT thread_id FROM thread_items
       WHERE server = ? AND repo_key = ? AND number = ? AND source IN ('sent', 'auto-fixer', 'linked')
@@ -385,6 +386,10 @@ export function openStore(
       const row = sql.deleteLink.get({ server, threadId, repoKey: item.repoKey, number: item.number, kind });
       return row === undefined ? null : sourceRowSchema.parse(row).source;
     },
+
+    /** Every thread with a link on `server`. */
+    linkedThreads: (server: string): string[] =>
+      sql.linkedThreads.all(server).map((row: unknown) => z.object({ thread_id: z.string() }).parse(row).thread_id),
 
     linksOf(server: string, threadIds: readonly string[]): StoredLink[] {
       if (threadIds.length === 0) return [];
