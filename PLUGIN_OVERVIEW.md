@@ -4,8 +4,9 @@ Gitea issues and pull requests inside BB. You can browse, comment, review, and l
 
 - Issue and pull request lists filtered by repository, state, and text, with My PRs and assigned-to-me My Issues views. Hide blocked keeps open issues with open Gitea dependencies out of the Issues and My Issues lists; unavailable or incomplete checks stay visible as Unverified.
 - A conversation view where you comment, edit or delete your own comments, pick labels and assignees, close or reopen, review, and see checks.
-- Direct **Start** / **Review** agent actions with clickable **⚡ agent** badges in lists and details. Multiple manual sends keep their linked thread history; badges indicate a past send, not a currently running agent. `bb gitea link` attaches items to a thread that already exists, and the thread's side panel lists every linked item as a table of its review and CI status.
+- Direct **Start** / **Review** agent actions with clickable **⚡ agent** badges in lists and details. Multiple manual sends keep their linked thread history; badges indicate a past send, not a currently running agent. `bb gitea link` attaches items to a thread that already exists.
 - A Files changed view with a file tree, unified or split diffs, and inline line comments.
+- Each BB thread's pull requests, with their review and CI status, in a table in its **Gitea** side panel and as a count in the thread header. The table has the pull requests the thread opened, pushed to, was started for, or was linked to with `bb gitea link`, and those of its child threads.
 - A **Gitea** environment for new threads. It lists the project's Gitea branches, yours first, with pull request badges that show CI and merge state. The thread starts on the picked branch in a new or existing worktree.
 - Auto-fix (fix CI failures and address review feedback) and Auto-merge (merge when Gitea allows) controls on My PRs and Pull requests. Each starts a hidden BB agent thread. Both are off by default.
 
@@ -19,7 +20,7 @@ Browsing and commenting use no agent time. The panel's agent actions, Auto-fix, 
 
 ## Commands
 
-Run `bb gitea` for the full list. Examples: `bb gitea my-prs`, `bb gitea show pr owner/repo 12`, `bb gitea auto-fix owner/repo 12 on`.
+Run `bb gitea` for the full list. Examples: `bb gitea my-prs`, `bb gitea show pr owner/repo 12`, `bb gitea auto-fix owner/repo 12 on`, `bb gitea thread`.
 
 Source and full docs: https://github.com/scowalt/bb-plugin-gitea
 

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   deriveCi,
   deriveReview,
-  itemStatusSchema,
   parsePull,
 } from "./item-status.js";
 
@@ -238,35 +237,5 @@ describe("pull request state", () => {
       parsePull(pull({ requested_reviewers: [], requested_reviewers_teams: [{ name: "dotnetapprovers" }] })).requested,
     ).toEqual(["dotnetapprovers"]);
     expect(parsePull(pull({})).requested).toEqual([]);
-  });
-});
-
-describe("item status schema", () => {
-  const pr = { kind: "pr", repo: "acme/widgets", number: 4, title: "Fix it", url: `${base}/acme/widgets/pulls/4` } as const;
-
-  it("accepts an open pull request with its CI and review", () => {
-    expect(
-      itemStatusSchema.safeParse({
-        ...pr,
-        lifecycle: { state: "open", draft: false, ci: { kind: "passing", total: 1 }, review: { kind: "none" } },
-      }).success,
-    ).toBe(true);
-  });
-
-  it("gives a merged pull request no CI to go stale", () => {
-    const parsed = itemStatusSchema.parse({
-      ...pr,
-      lifecycle: { state: "merged", ci: { kind: "failing", total: 1, failed: [{ name: "a", url: "" }] } },
-    });
-    expect(parsed).toEqual({ ...pr, lifecycle: { state: "merged" } });
-  });
-
-  it("rejects a failing CI that names no failed check", () => {
-    expect(
-      itemStatusSchema.safeParse({
-        ...pr,
-        lifecycle: { state: "open", draft: false, ci: { kind: "failing", total: 1, failed: [] }, review: { kind: "none" } },
-      }).success,
-    ).toBe(false);
   });
 });

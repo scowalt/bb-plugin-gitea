@@ -1,0 +1,20 @@
+[
+  {
+    "thread": "thr_s6iv9t6pze",
+    "startedAt": "2026-11-17T02:47:11Z",
+    "command": "cd $BB_THREAD_STORAGE; R=wonderlydotcom/internal-tool-work-compliance; for spec in \"fix/wail-hosted-model-catalog-read|main|fix(ai-modules): Let Wail read the hosted model catalog|pr-b.md\" \"chore/wonderly-ai-sdk-0-37-1|main|chore(deps): Move to Wonderly AI SDK 0.37.1|pr-a.md\"; do IFS='|' read head base title body <<<\"$spec\"; echo \"== $head\"; timeout 120 tea pulls create --repo $R --head \"$head\" --base \"$base\" --title \"$title\" --description \"$(cat $body)\" 2>&1 | grep -o 'pulls/[0-9]*' | head -1; done",
+    "output": "== fix/wail-hosted-model-catalog-read\npulls/252\n== chore/wonderly-ai-sdk-0-37-1\npulls/253\n"
+  },
+  {
+    "thread": "thr_s6iv9t6pze",
+    "startedAt": "2026-11-17T02:47:27Z",
+    "command": "cd $BB_THREAD_STORAGE; R=wonderlydotcom/internal-tool-work-compliance; sed -i 's/Stacked on #SDK-PR: it needs `Wonderly.AI.Modules.Langfuse` 0.37.1 and the SDK bump./Stacked on #253 (the SDK bump). It adds `Wonderly.AI.Modules.Langfuse` 0.37.1./; s/(see the SDK PR)/(see #253)/' pr-c.md; grep -n '#253' pr-c.md | cut -c1-120; timeout 120 tea pulls create --repo $R --head feat/ai-module-o11y-telemetry --base chore/wonderly-ai-sdk-0-37-1 --title \"feat(ai-modules): Send module spans and metrics to o11y\" --description \"$(cat pr-c.md)\" 2>&1 | grep -o 'pulls/[0-9]*' | head -1",
+    "output": "18:Stacked on #253 (the SDK bump). It adds `Wonderly.AI.Modules.Langfuse` 0.37.1.\n35:- Do not merge before the mirror publishes (see #253).\npulls/254\n"
+  },
+  {
+    "thread": "thr_96jd83kpwp",
+    "startedAt": "2026-11-15T22:41:30Z",
+    "command": "cd $BB_THREAD_STORAGE/proof && git push -q -u origin throwaway/merge-proof-thr96 2>&1 | grep -v \"^remote:\" | tail -2; tea pr create --repo wonderlydotcom/internal-tool-camp --base main --head throwaway/merge-proof-thr96 --title \"test: Throwaway proof that PR checks merge main, do not merge\" --description \"Throwaway for #4104. Branched from main~1 (100a12f003) plus #4104's commit, then adds an \\`AdSetRelaunchRules\\` export that main's #4103 also added. Typecheck passes on this head alone and fails once merged with main. Closing after the runs finish.\" 2>&1 | grep -o \"pulls/[0-9]*\" | head -1",
+    "output": "pulls/4105\n"
+  }
+]
