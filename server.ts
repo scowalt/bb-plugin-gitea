@@ -28,6 +28,7 @@ import { draftTitle, isDraftTitle } from "./draft-title.js";
 import { branchRpcMethods } from "./branch-contract.js";
 import { registerBranchProvider } from "./branch-provider.js";
 import type { PullStatus } from "./branch-order.js";
+import { autoFixerExecutionSchema } from "./execution.js";
 import { checkStatus } from "./item-status.js";
 import {
   archived,
@@ -36,7 +37,6 @@ import {
   automationOptions,
   automationPatchSchema,
   autoStartTargets,
-  autoFixerExecutionSchema,
   autoFixerPreferencesSchema,
   autoFixerSessionViewSchema,
   autoFixerView,
@@ -91,6 +91,7 @@ import {
   runThreadItemsCommand,
   threadItemsRpcMethods,
   threadLinkSchema,
+  threadPullsRpcMethods,
 } from "./thread-items/index.js";
 import {
   classifyIssueBlockers,
@@ -489,6 +490,7 @@ export const giteaRpcContract = defineRpcContract({
   },
   ...branchRpcMethods,
   ...threadItemsRpcMethods,
+  ...threadPullsRpcMethods,
 });
 
 type Repo = { repo: string; projectId: string | null; hostId?: string };
@@ -3222,6 +3224,7 @@ export default async function plugin(bb: BbPluginApi) {
       updatePreferences((current) => ({ ...current, execution })),
   } satisfies PluginRpcHandlers<typeof giteaRpcContract>;
   bb.rpc.register(giteaRpcContract, handlers);
+  bb.rpc.experimental_whileWatched("threadPulls", threadItems.watch);
   async function mentionItems(kind: "issue" | "pr", query: string) {
     const list = await readList(
       itemLists,

@@ -40,6 +40,7 @@
     "app-issue-filter.test.tsx",
     "app-agent-links.test.tsx",
     "app-thread-panel.test.tsx",
+    "app-thread-pulls.test.tsx",
     "vitest.config.ts"
   ]
 }

@@ -117,6 +117,10 @@ export const threadItemsViewSchema = z.object({
 });
 export type ThreadItemsView = z.infer<typeof threadItemsViewSchema>;
 
+/** A thread's pull requests, its own and its child threads', as the thread's header, context row and sidebar row show them. */
+export const threadPullsSchema = threadItemsViewSchema.pick({ pulls: true, summary: true });
+export type ThreadPulls = z.infer<typeof threadPullsSchema>;
+
 export const threadItemLinkSchema = itemRefSchema.extend({ threadId: z.string().min(1) });
 
 export const threadItemsRpcMethods = {

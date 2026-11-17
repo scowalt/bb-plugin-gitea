@@ -24,8 +24,10 @@ import {
 import type { PluginRpcClient, PluginRpcResult } from "@get-bb/plugin-sdk/app";
 import type { giteaRpcContract } from "./server.js";
 import { GITEA_BRANCH_ENVIRONMENT_PROVIDER_ID } from "./branch-inputs.js";
-import { GiteaThreadPanel, ThreadPullCount } from "./thread-items-panel.js";
+import { GiteaThreadPanel } from "./thread-items-panel.js";
+import { giteaTab, pullCountAction, usePullCounts } from "./thread-pulls.js";
 import { issueReferences } from "./issue-references.js";
+import { autoFixerExecutionSchema } from "./execution.js";
 import { GiteaBranchInputsControl } from "./environment-picker.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1790,10 +1792,15 @@ function AutoFixerPreferencesControl() {
         disabled={saving}
         align="end"
         onChange={(value) => {
-          const next = {
+          const parsed = autoFixerExecutionSchema.safeParse({
             ...value,
             serviceTier: value.serviceTier ?? "default",
-          };
+          });
+          if (!parsed.success) {
+            toast.error(parsed.error.issues[0]?.message ?? "Could not save settings");
+            return;
+          }
+          const next = parsed.data;
           if (
             execution.providerId === next.providerId &&
             execution.model === next.model &&
@@ -3222,16 +3229,22 @@ export default definePluginApp((app) => {
     path: "gitea",
     component: GiteaPanel,
   });
-  app.slots.threadPanelAction({
-    id: "item",
+  app.slots.experimental_tab({
+    ...giteaTab,
     title: "Gitea",
     icon: "gitea/teacup",
     component: GiteaThreadPanel,
   });
-  app.slots.experimental_threadHeaderAction({
+  app.slots.experimental_threadAction({
     id: "pulls",
     title: "Gitea pull requests",
-    component: ThreadPullCount,
+    icon: "GitPullRequest",
+    // Header actions sort by group as strings; the Git plugin's Commit uses "git",
+    // and the first action leads the shared split button, so the count goes first.
+    group: "2_pullRequest",
+    placement: "header",
+    useData: usePullCounts,
+    item: pullCountAction,
   });
   app.slots.experimental_appOverlay({
     id: "display-scope",

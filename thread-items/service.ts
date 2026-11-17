@@ -9,8 +9,10 @@ import type {
   ThreadItemsView,
   ThreadLink,
   ThreadPull,
+  ThreadPulls,
   threadItemsRpcMethods,
 } from "./contract.js";
+import { threadPullsKeyTag, threadPullsTag, type threadPullsRpcMethods } from "./read-contract.js";
 import { importLegacy } from "./legacy-import.js";
 import { canChange, readPull, summarize, type PullFacts } from "./pull-state.js";
 import { createRefresher } from "./refresher.js";
@@ -45,6 +47,8 @@ type RecordInput = {
 const maxDepth = 4;
 const maxThreads = 50;
 const treeTtlMs = 30_000;
+/** How often a watched thread's new commands are read and its items marked as looked at. */
+const watchEveryMs = 30_000;
 const changed = "thread-items-changed";
 
 type Tree = { threads: { id: string; title: string | null }[]; truncated: boolean };
@@ -74,7 +78,10 @@ const badged = (source: LinkSource) => source === "sent" || source === "linked";
  */
 export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   const store = openStore(bb.storage);
-  const publish = () => bb.realtime.publish(changed, {});
+  const publish = () => {
+    bb.realtime.publish(changed, {});
+    bb.rpc.experimental_invalidate([threadPullsTag]);
+  };
   const refresher = createRefresher({ store, gitea, publish, log: bb.log });
   const scanner = createScanner({
     bb,
@@ -165,10 +172,10 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     };
   }
 
-  async function view(threadId: string, { refresh = false } = {}): Promise<ThreadItemsView> {
+  /** What the store holds for a thread and its child threads; reads no events and no Gitea. */
+  async function itemsOf(threadId: string) {
     const tree = await treeOf(threadId);
     const ids = tree.threads.map((thread) => thread.id);
-    const scanning = (await Promise.all(ids.map((id) => scanner.forRead(id)))).some(Boolean);
     const server = gitea.server();
     const titles = new Map(tree.threads.map((thread) => [thread.id, thread.title]));
     const byPull = new Map<string, PullRows>();
@@ -192,6 +199,13 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       else byPull.set(key, [row]);
     }
     const pulls = [...byPull.values()].map((rows) => pullOf(server, threadId, titles, rows));
+    return { tree, server, pulls, issues };
+  }
+
+  async function view(threadId: string, { refresh = false } = {}): Promise<ThreadItemsView> {
+    const tree = await treeOf(threadId);
+    const scanning = (await Promise.all(tree.threads.map((thread) => scanner.forRead(thread.id)))).some(Boolean);
+    const { server, pulls, issues } = await itemsOf(threadId);
     const items = [...pulls, ...issues];
     if (refresh)
       for (const entry of items) if (canChange(entry.state)) store.expire(server, itemOf(entry.repo, entry.number));
@@ -206,6 +220,43 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       issues,
       summary: summarize(pulls),
     };
+  }
+
+  async function threadPulls(threadIds: readonly string[]): Promise<Record<string, ThreadPulls>> {
+    const rows = await Promise.all(
+      threadIds.map(async (threadId) => {
+        const { pulls } = await itemsOf(threadId);
+        return [threadId, { pulls, summary: summarize(pulls) }] as const;
+      }),
+    );
+    return Object.fromEntries(rows);
+  }
+
+  /**
+   * Keeps a thread a client shows current until the client leaves: reads its
+   * new commands and marks its items as looked at, which refreshes its open
+   * pull requests on the short interval.
+   */
+  function watch(read: { input: unknown } | { key: string }, signal: AbortSignal) {
+    if (!("key" in read) || signal.aborted) return;
+    const threadId = read.key;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let last: string | undefined;
+    const look = () => {
+      void view(threadId)
+        .then(({ pulls, summary }) => {
+          // A child thread created, moved or deleted changes these rows without a publish.
+          const rows = JSON.stringify({ pulls, summary });
+          if (last !== undefined && rows !== last) bb.rpc.experimental_invalidate([threadPullsKeyTag(threadId)]);
+          last = rows;
+        })
+        .catch((error: unknown) =>
+          bb.log.warn(`Could not refresh the watched thread ${threadId}: ${message(error)}`),
+        );
+      timer = setTimeout(look, watchEveryMs);
+    };
+    look();
+    signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
   }
 
   async function requireThread(threadId: string) {
@@ -237,6 +288,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
 
   const handlers = {
     threadItems: ({ threadId, refresh }) => view(threadId, { refresh }),
+    threadPulls: ({ keys }) => threadPulls(keys),
     async linkItem({ threadId, repo, number, kind }): Promise<{ result: "added" | "already" }> {
       const server = gitea.server();
       const item = itemOf(repo, number);
@@ -284,11 +336,12 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       if (removed) linkChanged(removed, kind, repo, number);
       return { removed: removed !== null };
     },
-  } satisfies PluginRpcHandlers<typeof threadItemsRpcMethods>;
+  } satisfies PluginRpcHandlers<typeof threadItemsRpcMethods & typeof threadPullsRpcMethods>;
 
   return {
     handlers,
     view,
+    watch,
     server: () => gitea.server(),
 
     /** Links an item to a thread the plugin started for it. */
