@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0 - 2026-11-17
+
+### Added
+
+- The row above a thread's composer lists the thread's pull requests, its own and its child threads', as **#n** pills in the colours of their table chips: green when CI passes, red when it fails, yellow while it runs, grey without CI or when CI could not be read, purple when merged, grey when closed or not read yet. Pull requests that can still change come first. Past three, the rest collapse to **+N**. Hover a pill to see which pull request it is and how it stands. Clicking a pill or **+N** opens the thread's **Gitea** table. The row shows nothing while the thread has no pull request, and nothing while the pane shows the thread context card instead.
+- The thread context card lists the same pull requests in its pull request rows, one row each with **#n**, the title and the table's chip, and a **+N more pull requests** row past three. Clicking a row opens the **Gitea** table. bb shows the card only while the `threadContextCard` experiment is on.
+- Sidebar rows show how many pull requests the thread has, in a pill that is red when any open pull request's CI fails, yellow while CI runs, purple when all are merged and green otherwise. Hover it for the breakdown and one line per pull request. The pill needs the `threadRowMetadata` experiment and **Organize → Rows → Metadata** turned on, and shows only in bb's own sidebar or in a plugin's thread list that draws `experimental_ThreadRowMetadata`.
+- The `threadPulls` and `threadPullBadges` RPCs return each listed thread's pull requests and summary, keyed by thread id, from what the plugin stored. They read no Gitea and no thread history.
+
+### Changed
+
+- **Breaking:** the plugin needs plugin SDK 0.6.146 or newer.
+- The thread header's pull request count is a bb header button, which shows only its label, so the label takes the place of the coloured dot and says how the pull requests stand, worst first: **3 PRs · 1 failing**, **2 PRs · CI running**, **2 PRs · all merged**, otherwise the merged count as before. Clicking it still opens the table. When the Git plugin's **Commit** button also shows, the count comes first and Commit joins its menu. The **Gitea** tab keeps its id, so tabs already open keep working.
+- The table, the header count and the rows in the thread include pull requests from child threads up to four levels down with no 50-thread limit. The limit now applies only to the threads whose new commands the table reads when it opens.
+- While bb shows a thread's header, context row or card, the plugin reads the thread's new commands every 30 seconds and keeps its open pull requests on the 30-second refresh, as an open table did. Sidebar badges do neither, so the refresher's 12 tea calls in any 30 seconds stay for the threads on screen.
+- The model picker for auto-fixers refuses a reasoning level or service tier the plugin does not know before it saves, where the server refused it before.
+
 ## 1.1.0 - 2026-11-16
 
 ### Added

@@ -4,14 +4,14 @@ Browse and act on Gitea issues and pull requests from BB, and let a BB agent fix
 
 ## Requirements
 
-- BB 0.44.0 or newer with bundled plugin SDK 0.5.29 or newer. SDK 0.5.29 is the earliest published version with `threads.get().canRestoreEnvironment`, used to detect when an auto-fixer needs its workspace restored.
+- BB with bundled plugin SDK 0.6.146 or newer. The thread tab, header button, context row, context card row and sidebar badge use the SDK 0.6 slots.
 - `tea` 0.15.1 or newer, signed in with `tea login add`.
 - A BB project whose `origin` remote points at the Gitea instance, or repositories listed in `extraRepos`. Agent features need a project checkout.
 
 ## Install
 
 ```sh
-bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.1.0'
+bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.2.0'
 bb plugin update gitea --yes   # later, to update
 ```
 
@@ -64,7 +64,7 @@ The side panel of a BB thread shows a **Gitea** table of every pull request asso
 - the thread ran `git push` and Gitea answered with a `remote:` line that names the pull request;
 - the plugin started the thread for it, with **Send agent**, **Review with agent**, or an auto-fixer;
 - someone linked it with `bb gitea link`;
-- a child thread has it, up to four levels down and 50 threads in all. Its row says **from child** and the child's title under the pull request's title.
+- a child thread has it, up to four levels down. Its row says **from child** and the child's title under the pull request's title. Opening the table reads new commands from at most 50 of those threads; the others are read when they go idle.
 
 Hover a pull request's name to see how the thread got it. When Gitea says a pull request was created before the command that printed its URL ran, or that it does not exist, the row disappears, unless the thread also pushed to it or linked it: the URL came from other text the command printed, such as the new pull request's body. Issues the thread was started for or linked to follow the pull requests, with their title and **Issue · Open** or **Issue · Closed**. An old thread's history is read the first time its table opens, and the table says **Scanning thread history…** until that finishes.
 
@@ -72,7 +72,15 @@ The table has no description, comments or diff; click a row to open the item on 
 
 The table reads what the plugin last stored, and the plugin refreshes it in the background: an open pull request or issue every 30 seconds while someone has its thread open and every 10 minutes otherwise, a closed one every 5 minutes or 6 hours, and a merged pull request never. Each refresh of an open pull request reads its reviews and CI again. Changes made through the plugin, such as a comment or a merge, are read again at once. **Refresh** asks for every open row, and every row not read yet, to be read again. A failed read keeps the last known state, shows a warning with Gitea's error, and backs off up to an hour. The refresher reads one item at a time and starts at most 12 tea calls in any 30 seconds: an open pull request costs three or more, and anything else one.
 
-The thread header shows the count, such as **3 PRs · 2 merged**, once a thread has one. Issues are not counted. Its dot is red when any open pull request's CI fails, yellow while CI runs, purple when all are merged, and green otherwise. Clicking it opens the table.
+The thread header shows the count once a thread has one, with how the pull requests stand, worst first: **3 PRs · 1 failing** when any open pull request's CI fails, **2 PRs · CI running** while CI runs, **2 PRs · all merged**, and otherwise the merged count, such as **3 PRs · 2 merged**. Issues are not counted. Clicking it opens the table. When the Git plugin's **Commit** button also shows, the count comes first and Commit joins its menu.
+
+The same pull requests show in the thread itself, so you can follow their CI without opening the table:
+
+- The row above the composer lists them as **#n** pills in the colours of their table chips: green when CI passes, red when it fails, yellow while it runs, grey without CI or when CI could not be read, purple when merged, grey when closed or not read yet. Pull requests that can still change come first, and past three the rest collapse to **+N**. Hover a pill to see the pull request and its state.
+- When the pane shows the thread context card instead of that row, the card has one row per pull request with **#n**, its title and the table's chip, and a **+N more pull requests** row past three. bb shows the card only while the `threadContextCard` experiment is on.
+- A sidebar row shows how many pull requests its thread has, in a pill that is red when any open pull request's CI fails, yellow while CI runs, purple when all are merged and green otherwise. Hover it for the breakdown and each pull request. The pill needs the `threadRowMetadata` experiment and **Organize → Rows → Metadata** turned on, and shows only in bb's own sidebar or in a plugin's thread list that draws `experimental_ThreadRowMetadata`.
+
+Clicking a pill, a card row or **+N** opens the table. None of them shows while the thread has no pull request. While bb shows a thread's header, context row or card, the plugin reads the thread's new commands every 30 seconds and keeps its open pull requests on the 30-second refresh. Sidebar badges read only what the plugin stored, so a long sidebar costs no tea calls and no history reads.
 
 To attach an item to a thread that already exists, such as a pull request the thread lands but did not open, run `bb gitea link <issue|pr> <owner/repo> <number>` from that thread, or pass `--thread <thread-id>`. An issue or pull request URL on the configured server works in place of the three arguments. The link gets the same **⚡ agent** badge and **Agents** entry as a send. Linking an item that is already linked changes nothing. `bb gitea unlink` takes the same arguments and removes the link. Linking reads the item from Gitea to check that it exists and is the kind you named; it writes nothing to Gitea. A linked pull request's review and CI appear after the next background read.
 
