@@ -14,7 +14,7 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea conversation <issue|pr> <owner/repo> <number> [--refresh]` returns what the panel shows, without files. It is cached; `freshness.state` is `fresh`, `refreshing`, or `stale-error`. `--refresh` rereads Gitea. Comment `id`s come from here.
 - `bb gitea files <owner/repo> <number> [--refresh]` returns changed files and diffs for the returned `revision`, with `freshness` and a `stale` flag when the pull request moved during the read. Each file's `diff.kind` is `text` (with `patch`), `empty`, `binary`, `too-large` (over 256 KiB), or `unavailable` with `reason` `missing`, `stale`, `diff-too-large`, or `diff-failed`.
 - `bb gitea options <owner/repo>` lists the repository's labels (name and color) and assignable users.
-- `bb gitea thread <thread-id>` reads the item linked to a BB thread.
+- `bb gitea thread <thread-id>` lists every item linked to a BB thread, oldest link first. `--json` returns `{ items: [{ repo, number, kind }] }`.
 - `bb gitea refresh` rediscovers repositories now. Otherwise discovery is reused for 30 seconds, so a newly added project can take that long to appear.
 
 ## Write
@@ -30,6 +30,8 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea review <owner/repo> <number> <APPROVED|REQUEST_CHANGES|COMMENT> [body]`
 - `bb gitea send-agent <issue|pr> <owner/repo> <number>` starts a BB thread on the item. The item's repository needs a BB project checkout. The thread is told not to write to Gitea unless asked. This and the panel's direct Start/Review actions append manual thread links; clickable ⚡ agent badges show the resulting history, separately from auto-fixer status.
 - `bb gitea agent-execution [<provider> <model> <reasoning> [fast|default] | default]` shows or sets the model for send-agent threads. `default` uses the project default.
+- `bb gitea link <issue|pr> <owner/repo> <number> [--thread <thread-id>]` links an item to an existing BB thread, by default the thread that runs the command. It adds the same ⚡ agent badge as a send and writes nothing to Gitea. It fails if the thread is deleted or the item is the other kind. Linking an item twice is a no-op; the output says `already linked`. `--json` returns `{ changed, items }`, where `items` lists everything now linked to the thread.
+- `bb gitea unlink <issue|pr> <owner/repo> <number> [--thread <thread-id>]` removes that link from the thread and from the item's badges. Other threads' links to the item stay.
 
 ## Auto-fix and Auto-merge
 
@@ -51,9 +53,9 @@ Turning either on starts an auto-fixer: a hidden BB thread on the host of the re
 
 ## RPCs
 
-Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItem`, `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
+Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItems` (`{ items }` for a `threadId`), `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
 
-Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
+Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `linkThread` and `unlinkThread` (`{ repo, number, kind, threadId }`, returning `{ changed, items }`; bb-side only, no Gitea write), `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
 
 Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `retryAutoFixer`, `getAutoFixerStatus`, `autoFixerThread`, `listAutoFixerSessions`, `getAutoFixerPreferences`, `setAutoAutomation` (`fix`, `merge`, or both), `setAutoFixerExecution`.
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.8 - 2026-11-16
+
+### Added
+
+- Add `bb gitea link <issue|pr> <owner/repo> <number> [--thread <thread-id>]` and the `linkThread` RPC. They link an issue or pull request to a BB thread that already exists, by default the thread that runs the command. The link adds the same **⚡ agent** badge and **Agents** entry as a send. Linking checks the thread and the item's kind and writes nothing to Gitea. Linking an item twice is a no-op.
+- Add `bb gitea unlink` and the `unlinkThread` RPC to remove a link.
+- A thread can have several linked items. The thread side panel shows a menu to switch between them when there is more than one, and it updates when links change.
+
+### Changed
+
+- `bb gitea thread <thread-id>` lists every linked item. Its `--json` output is now `{ items: [...] }` instead of one item or `null`, and the `threadItem` RPC is replaced by `threadItems`.
+- A thread's links are stored as a list. A link stored as one item by 1.0.7 or earlier is still read, and becomes a list the next time that thread's links change.
+
+### Tests
+
+- Cover linking from the CLI with and without `--thread`, the duplicate no-op, several items on one thread, concurrent unlinks, rejected links, unlinking, the 1.0.7 single-item value, the auto-fixer's link, and the panel's switcher.
+
 ## 1.0.7 - 2026-10-12
 
 ### Added

@@ -3232,49 +3232,93 @@ function CommentComposer({
   );
 }
 
-function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
+function useThreadItems(threadId: string): Loadable<ItemRef[]> {
   const rpc = useRpc<typeof giteaRpcContract>();
-  const [linked, setLinked] = useState<Loadable<ItemRef>>(loading);
-  useEffect(() => {
-    let current = true;
-    setLinked(loading);
-    void rpc
-      .call("threadItem", { threadId })
-      .then((linked) => {
-        if (!current) return;
-        setLinked(linked
-          ? { state: "ready", value: linked }
-          : { state: "error", message: "This BB thread is not linked to a Gitea issue or pull request." });
-      })
-      .catch((reason: unknown) => {
-        if (current)
-          setLinked({ state: "error", message: errorText(reason, "Could not load the linked Gitea item.") });
-      });
-    return () => {
-      current = false;
-    };
+  const [linked, setLinked] = useState<Loadable<ItemRef[]>>(loading);
+  const requestId = useRef(0);
+  const load = useCallback(async () => {
+    const request = ++requestId.current;
+    try {
+      const { items } = await rpc.call("threadItems", { threadId });
+      if (request !== requestId.current) return;
+      const keys = items.map(agentLinkKey).join(" ");
+      // Keep the same objects when another item's links changed, so the shown item does not reload.
+      setLinked((previous) =>
+        previous.state === "ready" && previous.value.map(agentLinkKey).join(" ") === keys
+          ? previous
+          : { state: "ready", value: items });
+    } catch (reason) {
+      if (request === requestId.current)
+        setLinked({ state: "error", message: errorText(reason, "Could not load the linked Gitea items.") });
+    }
   }, [rpc, threadId]);
+  useEffect(() => {
+    setLinked(loading);
+    void load();
+    return () => { requestId.current += 1; };
+  }, [load]);
+  useRealtime("links-changed", load);
+  return linked;
+}
+
+function LinkedItemSwitcher({ items, selected, onSelect }: {
+  items: ItemRef[];
+  selected: ItemRef;
+  onSelect: (key: string) => void;
+}) {
+  if (items.length < 2) return null;
+  return (
+    <div className="shrink-0 border-b px-4 py-2">
+      <Select value={agentLinkKey(selected)} onValueChange={onSelect}>
+        <SelectTrigger aria-label="Linked Gitea item" className="h-8 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {items.map((item) => (
+            <SelectItem key={agentLinkKey(item)} value={agentLinkKey(item)}>
+              {item.repo}#{item.number} · {item.kind}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
+  const linked = useThreadItems(threadId);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [section, setSection] = useState<DetailSection>("conversation");
-  useEffect(() => setSection("conversation"), [threadId]);
+  useEffect(() => {
+    setSelectedKey(null);
+    setSection("conversation");
+  }, [threadId]);
   const viewer = useViewerLogin();
-  const item = linked.state === "ready" ? linked.value : null;
+  const items = linked.state === "ready" ? linked.value : [];
+  const item = items.find((entry) => agentLinkKey(entry) === selectedKey) ?? items[0] ?? null;
+  const select = (key: string) => {
+    setSelectedKey(key);
+    setSection("conversation");
+  };
   const display = useItemDisplay(
     item,
     item?.kind === "pr" && section === "files",
   );
   const shown = display.conversation;
-  if (linked.state === "error" || shown.state === "error")
-    return (
-      <div className="p-4 text-sm text-muted-foreground">
-        {linked.state === "error" ? linked.message : shown.state === "error" ? shown.message : ""}
-      </div>
-    );
-  if (linked.state === "loading" || shown.state === "loading")
-    return (
-      <div className="p-4 text-sm text-muted-foreground">
-        Loading Gitea item…
-      </div>
-    );
+  const switcher = item && (
+    <LinkedItemSwitcher items={items} selected={item} onSelect={select} />
+  );
+  const notice = (message: string) => (
+    <div className="flex h-full min-h-0 flex-col text-sm">
+      {switcher}
+      <div className="p-4 text-muted-foreground">{message}</div>
+    </div>
+  );
+  if (linked.state === "error") return notice(linked.message);
+  if (linked.state === "loading") return notice("Loading Gitea item…");
+  if (!item) return notice("This BB thread is not linked to a Gitea issue or pull request.");
+  if (shown.state === "error") return notice(shown.message);
+  if (shown.state === "loading") return notice("Loading Gitea item…");
   const detail = shown.value.conversation;
   const header = (
     <header className="shrink-0 space-y-2 border-b p-4">
@@ -3340,6 +3384,7 @@ function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
   if (detail.kind !== "pr")
     return (
       <div className="flex h-full min-h-0 flex-col text-sm">
+        {switcher}
         {header}
         <div className="min-h-0 flex-1 overflow-y-auto">{conversation}</div>
       </div>
@@ -3350,6 +3395,7 @@ function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
       onValueChange={(value) => setSection(value as DetailSection)}
       className="flex h-full min-h-0 flex-col text-sm"
     >
+      {switcher}
       {header}
       <TabsContent
         value="conversation"
