@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-gitea",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Gitea issues and pull requests inside BB, backed by the Gitea tea CLI.",
   "license": "MIT",
   "repository": {
