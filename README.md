@@ -11,7 +11,7 @@ Browse and act on Gitea issues and pull requests from BB, and let a BB agent fix
 ## Install
 
 ```sh
-bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.0.8'
+bb plugin install 'git:https://github.com/scowalt/bb-plugin-gitea.git@^1.0.9'
 bb plugin update gitea --yes   # later, to update
 ```
 
@@ -56,7 +56,7 @@ List rows also have **Start** (issues) and **Review** (pull requests). Successfu
 
 New link history is scoped to the configured Gitea server and login. Older single-thread links still open from detail; threads created through the former unlinked **Draft with agent** flow cannot be reconstructed automatically.
 
-The same views appear in the side panel of a BB thread linked to the item. A thread can have more than one linked item; the side panel then shows a menu at the top to switch between them.
+The side panel of a BB thread shows a **Gitea** table of every item linked to the thread, one row each, with the pull request, its **Review** status and its **CI** status. It has no description, comments or diff; click a row to open the item on Gitea. Review is **Changes requested** if any reviewer's latest approving or rejecting review requests changes, otherwise **Approved**, otherwise **Awaiting** the requested reviewers and teams that have not reviewed yet, otherwise **No review**. A requested reviewer who only commented, such as a review bot, is not awaited. CI comes from the head commit's statuses: **Passing**, **N failing** (click it to open the first failed check), **Running**, **No CI**, or **Unknown** when the status could not be read. Merged and closed pull requests show only **Merged** or **Closed**, and an issue shows its state. The table refreshes every 30 seconds and when the item changes, and its **Refresh** button rereads every row. One row that fails to load does not hide the others.
 
 To attach an item to a thread that already exists, run `bb gitea link <issue|pr> <owner/repo> <number>` from that thread, or pass `--thread <thread-id>`. The link gets the same **⚡ agent** badge and **Agents** entry as a send. Linking an item that is already linked changes nothing. `bb gitea unlink` takes the same arguments and removes the link. Linking reads the item from Gitea to check that it exists and is the kind you named; it writes nothing to Gitea.
 
@@ -143,7 +143,7 @@ Comment ids come from `bb gitea conversation ... --json`. `--old` puts a line co
 
 ## Behavior and limits
 
-- `conversation`, `files`, and the panel read through a short in-memory cache (about 15 seconds for conversations and lists, 5 minutes for diffs) and refresh in the background. Repository discovery is reused for 30 seconds and label and assignee options for 60 seconds; `bb gitea refresh` clears both. Any write through the plugin clears the affected entries. `show`, `issues`, `prs`, `my-prs`, `my-issues`, auto-fixers, and merges always read Gitea directly.
+- `conversation`, `itemStatus`, `files`, and the panel read through a short in-memory cache (about 15 seconds for conversations and lists, 5 minutes for diffs) and refresh in the background. Repository discovery is reused for 30 seconds and label and assignee options for 60 seconds; `bb gitea refresh` clears both. Any write through the plugin clears the affected entries. `show`, `issues`, `prs`, `my-prs`, `my-issues`, auto-fixers, and merges always read Gitea directly.
 - Lists cover at most 50 repositories and 200 items. Hide blocked checks dependencies only for matching open issues within that cap, with at most eight concurrent tea requests. Checks stop once an open blocker is found, or after ten pages; incomplete results are unverified. Blocker checks are cached for 15 seconds without serving stale results; Refresh, writes, and account/settings changes invalidate them. A filtered list may be empty while additional issues exist beyond the cap; narrow the repository or search.
 - Comments and reviews stop at 500, files at 500, checks at 100. Results that hit a cap say so.
 - Checks come from commit statuses.

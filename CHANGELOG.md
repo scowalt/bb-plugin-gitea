@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.9 - 2026-11-16
+
+### Changed
+
+- The thread side panel is now a **Gitea** table with one row per linked item: the pull request, its review status and its CI status. It no longer shows the description, conversation or changed files, and the menu for switching between linked items is gone. Open the item on Gitea from its row.
+- Review status is **Changes requested**, **Approved**, **Awaiting** (requested reviewers and teams that have not reviewed) or **No review**. A requested reviewer who only commented is not awaited. CI status is **Passing**, **N failing**, **Running**, **No CI** or **Unknown**, read from the head commit's combined status. Merged and closed pull requests show only their state, and issues show open or closed.
+
+### Added
+
+- Add the `itemStatus` RPC, which returns one linked item's status through the same cache as `conversation`.
+
+### Tests
+
+- Cover the CI and review derivations, the `itemStatus` RPC for open, merged, closed and issue items, and the panel's rows, errors, refresh and realtime updates.
+
 ## 1.0.8 - 2026-11-16
 
 ### Added

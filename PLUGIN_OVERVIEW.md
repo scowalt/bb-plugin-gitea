@@ -4,7 +4,7 @@ Gitea issues and pull requests inside BB. You can browse, comment, review, and l
 
 - Issue and pull request lists filtered by repository, state, and text, with My PRs and assigned-to-me My Issues views. Hide blocked keeps open issues with open Gitea dependencies out of the Issues and My Issues lists; unavailable or incomplete checks stay visible as Unverified.
 - A conversation view where you comment, edit or delete your own comments, pick labels and assignees, close or reopen, review, and see checks.
-- Direct **Start** / **Review** agent actions with clickable **⚡ agent** badges in lists and details. Multiple manual sends keep their linked thread history; badges indicate a past send, not a currently running agent. `bb gitea link` attaches items to a thread that already exists, and a thread with several items lets you switch between them in its side panel.
+- Direct **Start** / **Review** agent actions with clickable **⚡ agent** badges in lists and details. Multiple manual sends keep their linked thread history; badges indicate a past send, not a currently running agent. `bb gitea link` attaches items to a thread that already exists, and the thread's side panel lists every linked item as a table of its review and CI status.
 - A Files changed view with a file tree, unified or split diffs, and inline line comments.
 - A **Gitea** environment for new threads. It lists the project's Gitea branches, yours first, with pull request badges that show CI and merge state. The thread starts on the picked branch in a new or existing worktree.
 - Auto-fix (fix CI failures and address review feedback) and Auto-merge (merge when Gitea allows) controls on My PRs and Pull requests. Each starts a hidden BB agent thread. Both are off by default.
