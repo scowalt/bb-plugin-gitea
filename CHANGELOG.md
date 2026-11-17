@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.0 - 2026-11-16
+
+### Added
+
+- The thread's **Gitea** table now lists every pull request the thread is associated with, not only the ones linked to it. A pull request is listed when the thread created it (`tea pr create`, `tea pulls create`, or `tea api -X POST …/pulls`), pushed to it (`git push` printed its URL on a `remote:` line), was started for it by **Send agent** or an auto-fixer, or was linked with `bb gitea link`. Pull requests of child threads, up to four levels down and 50 threads in all, are listed too, with **from child** and the child's title under their own title. A create whose output was cut down to `pulls/<n>` or a bare number, such as `| grep -o 'pulls/[0-9]*'` or `| jq -r .number`, is matched to the pull requests the tea login created while it ran with a number it named, through Gitea's pull request search; `#<n>` does not count. Hover a pull request's name to see how the thread got it. A URL that a create command only printed, such as an older pull request mentioned in the new one's body, is dropped once Gitea shows that pull request was created before the command ran, or answers that it does not exist.
+- The thread header shows the thread's pull request count, such as **3 PRs · 2 merged**, once it has one. Issues are not counted. Its dot is red when any open pull request's CI fails, yellow while CI runs, purple when all are merged, and green otherwise. Clicking it opens the table.
+- The first time a thread's table or `bb gitea thread` reads an old thread, it reads the thread's history and says **Scanning thread history…** until it finishes.
+- `bb gitea link` and `bb gitea unlink` also take an issue or pull request URL on the configured server in place of `<issue|pr> <owner/repo> <number>`.
+- `bb gitea thread` uses the thread it runs in when no thread id is given, and `--scan` reads the thread's whole history again.
+
+### Changed
+
+- The table no longer reads Gitea when it opens. The plugin keeps each listed pull request's state, review, and CI, and each listed issue's title and state, in its database and refreshes them in the background: an open item every 30 seconds while someone has its thread open and every 10 minutes otherwise, a closed one every 5 minutes or 6 hours, and a merged pull request never. Every refresh of an open pull request reads its reviews and its head's statuses again, so a re-run or a check posted later shows up on the same head. The refresher starts at most 12 tea calls in any 30 seconds; an open pull request costs three or more (the pull request, its reviews, and its head's statuses, one call per page), and a merged or closed one or an issue costs one. Looking up a cut-down create costs one call per page of 50 search results; it pages back until it reaches the command's start, up to 10 pages, and gives up with a log line after that. **Refresh** asks for the open and not yet read rows to be read again, and the table updates when the reads finish. A row whose last read failed keeps its last state and shows a warning with Gitea's error.
+- A CI status read that fails for any reason now shows **Unknown**. In 1.0.9, a 403 or 404 from the status endpoint failed the whole row.
+- **Breaking:** `bb gitea thread --json` prints the thread's table data (`threadId`, `server`, `scanning`, `descendantsTruncated`, `pulls`, `issues`, `summary`) instead of `{ items }`. Its human output has one line per pull request, such as `merged    owner/repo#12  Title  (opened)`.
+- `bb gitea link` for a pull request reads only the pull request, so a failing reviews or status read no longer refuses the link; the refresher reads them right after.
+- A view reads a thread's new events from bb at most every 30 seconds; a thread going idle or failing is read at once.
+- **Breaking:** `bb gitea link --json` prints `{ result: "added" | "already" }` and `bb gitea unlink --json` prints `{ removed }`, instead of `{ changed, items }`. Their human output no longer lists the thread's other items.
+- **Breaking:** the `linkThread` and `unlinkThread` RPCs are replaced by `linkItem` and `unlinkItem`, which take the same input. `threadItems` returns the table data and takes an optional `refresh`. The `itemStatus` RPC is removed.
+- Thread links are stored in the plugin's SQLite database. On its first load, 1.1.0 copies the `link:`, `thread-link:`, and `thread:` keys that 1.0.9 and earlier wrote into it, and records `thread-items-imported`. The old keys stay for one release, so a downgrade still sees the links made before the upgrade. If a key's item kind cannot be read from Gitea, the import runs again on the next load. **Open linked BB thread** and the **⚡ agent** badges are unchanged.
+
+### Fixed
+
+- Publish `issue-references.ts`, which the app imports, in the package files.
+
+### Tests
+
+- Cover detection against real thread commands (OSC-8 links, several creates in one command, a body that mentions an older pull request, a quiet push, creates cut down to `pulls/<n>`), the search that resolves a cut-down create against real Gitea search results (its paging, page cap, budget, and retry after a failed search), scan cursors and crash safety, backfill, rescans during a scan, child threads, the creation-time check and what a rejected candidate falls back to, the refresh budget with reviews and multi-page reads, CI read again on the same head, the cadence, issue reads, a candidate Gitea answers 404 for, a plugin change during a read, Refresh of open rows only, the 30-second event read, failed reads, the kv import of 1.0.7 and 1.0.9 data, the CLI, and the table and header rows built from the thread's tracked pull requests.
+
 ## 1.0.9 - 2026-11-16
 
 ### Changed

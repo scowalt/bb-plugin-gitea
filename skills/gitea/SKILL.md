@@ -14,7 +14,7 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea conversation <issue|pr> <owner/repo> <number> [--refresh]` returns what the panel shows, without files. It is cached; `freshness.state` is `fresh`, `refreshing`, or `stale-error`. `--refresh` rereads Gitea. Comment `id`s come from here.
 - `bb gitea files <owner/repo> <number> [--refresh]` returns changed files and diffs for the returned `revision`, with `freshness` and a `stale` flag when the pull request moved during the read. Each file's `diff.kind` is `text` (with `patch`), `empty`, `binary`, `too-large` (over 256 KiB), or `unavailable` with `reason` `missing`, `stale`, `diff-too-large`, or `diff-failed`.
 - `bb gitea options <owner/repo>` lists the repository's labels (name and color) and assignable users.
-- `bb gitea thread <thread-id>` lists every item linked to a BB thread, oldest link first. `--json` returns `{ items: [{ repo, number, kind }] }`. The thread's side panel shows those items as a table of review and CI status, with no description, comments or diff.
+- `bb gitea thread [<thread-id>] [--scan]` lists the pull requests of a BB thread, this one by default, and of its child threads, with each one's state and how the thread got it (`opened`, `pushed`, `sent`, `auto-fixer`, `linked`, or `from child <thread>`). `--json` returns `pulls` (each with `state`, null until first read, holding the title and, while open, `review` and `ci`; `error` when the last read failed; `via`; and `links`), `issues` (each with `state`, null until first read, holding the title and `open` or `closed`), `summary` (pull requests only), and `scanning`. `--scan` rereads the thread's whole history. The thread's side panel shows the same pull requests as a table of review and CI status.
 - `bb gitea refresh` rediscovers repositories now. Otherwise discovery is reused for 30 seconds, so a newly added project can take that long to appear.
 
 ## Write
@@ -30,8 +30,12 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea review <owner/repo> <number> <APPROVED|REQUEST_CHANGES|COMMENT> [body]`
 - `bb gitea send-agent <issue|pr> <owner/repo> <number>` starts a BB thread on the item. The item's repository needs a BB project checkout. The thread is told not to write to Gitea unless asked. This and the panel's direct Start/Review actions append manual thread links; clickable ⚡ agent badges show the resulting history, separately from auto-fixer status.
 - `bb gitea agent-execution [<provider> <model> <reasoning> [fast|default] | default]` shows or sets the model for send-agent threads. `default` uses the project default.
-- `bb gitea link <issue|pr> <owner/repo> <number> [--thread <thread-id>]` links an item to an existing BB thread, by default the thread that runs the command. It adds the same ⚡ agent badge as a send and writes nothing to Gitea. It fails if the thread is deleted or the item is the other kind. Linking an item twice is a no-op; the output says `already linked`. `--json` returns `{ changed, items }`, where `items` lists everything now linked to the thread.
-- `bb gitea unlink <issue|pr> <owner/repo> <number> [--thread <thread-id>]` removes that link from the thread and from the item's badges. Other threads' links to the item stay.
+- `bb gitea link <issue|pr> <owner/repo> <number> [--thread <thread-id>]`, or `bb gitea link <url>`, links an item to an existing BB thread, by default the thread that runs the command. It adds the same ⚡ agent badge as a send and writes nothing to Gitea. It fails if the thread is deleted or the item is the other kind. Linking an item twice is a no-op; the output says `already linked`. `--json` returns `{ result: "added" | "already" }`.
+- `bb gitea unlink` takes the same arguments and removes that link from the thread and from the item's badges. Other threads' links to the item stay. `--json` returns `{ removed }`.
+
+## A thread's pull requests
+
+Do nothing to make a pull request show up in your thread's Gitea table. The plugin reads your thread's commands. A successful `tea pr create`, `tea pulls create`, or `tea api -X POST …/pulls` links each pull request URL it printed for this server, and a `git push` links the pull request named on a `remote:` line. A URL that only appeared in printed text, such as an older pull request mentioned in the new one's body, is dropped once Gitea shows it was created before the command ran. A create whose output you cut down to `pulls/<n>` or a bare number, with `| grep -o 'pulls/[0-9]*'` or `| jq -r .number`, is linked too: the plugin finds the pull requests your tea login created while the command ran with a number the output named. `#<n>` does not count. Run `bb gitea link pr` only for one the plugin cannot see, such as a pull request you land but did not open, or one created in the web UI.
 
 ## Auto-fix and Auto-merge
 
@@ -53,9 +57,9 @@ Turning either on starts an auto-fixer: a hidden BB thread on the host of the re
 
 ## RPCs
 
-Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `itemStatus` (`{ freshness, status }` for one linked item: an open pull request's CI and review verdict, or just `merged` or `closed`; this is what the thread panel reads), `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItems` (`{ items }` for a `threadId`), `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
+Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItems` (`threadId` and optional `refresh`; the thread's pull requests with their stored state, review and CI, its child threads' pull requests, and the issues it was started for, with a `summary`; `refresh` reads the open and not yet read ones again on the next sweep; the realtime channel `thread-items-changed` says when to read it again), `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
 
-Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `linkThread` and `unlinkThread` (`{ repo, number, kind, threadId }`, returning `{ changed, items }`; bb-side only, no Gitea write), `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
+Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `linkItem` and `unlinkItem` (`{ repo, number, kind, threadId }`, returning `{ result }` and `{ removed }`; bb-side only, no Gitea write), `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
 
 Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `retryAutoFixer`, `getAutoFixerStatus`, `autoFixerThread`, `listAutoFixerSessions`, `getAutoFixerPreferences`, `setAutoAutomation` (`fix`, `merge`, or both), `setAutoFixerExecution`.
 
@@ -63,7 +67,8 @@ Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `r
 
 - Lists cover at most 50 repositories, ten pages of 50 items per repository, and 200 items total. Errors are reported per repository.
 - Comments and reviews stop at 500, files at 500, checks at 100. A full result is marked as possibly truncated.
-- Panel caches: conversations and item statuses 15 s fresh and 10 min stale, file sets 5 min fresh and 30 min stale, lists 15 s fresh and 10 min stale. Writes, settings changes, and rejected logins clear them. `show`, list commands, auto-fixers, and merges never use the cache.
+- Thread table: open pull requests and issues are reread every 30 s while their thread is open and every 10 min otherwise, closed ones every 5 min or 6 h, merged ones never; an open pull request's reviews and CI are read on every refresh; at most 12 tea calls in any 30 s.
+- Panel caches: conversations 15 s fresh and 10 min stale, file sets 5 min fresh and 30 min stale, lists 15 s fresh and 10 min stale. Writes, settings changes, and rejected logins clear them. `show`, list commands, auto-fixers, and merges never use the cache.
 - Issue blocker checks use only dependency endpoints, stop at a known open blocker or ten pages, and share the eight-request tea limit. They are cached for 15 seconds without stale reuse and are invalidated by refreshes, writes, and account/settings changes. A filtered empty list may still have unchecked issues beyond the 200-item cap; narrow the repository or query.
 - Checks come from commit statuses.
 
