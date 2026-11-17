@@ -1,11 +1,11 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  itemSnapshotSchema,
   linkSources,
-  pullSnapshotSchema,
   type ItemKind,
+  type ItemSnapshot,
   type LinkSource,
-  type PullSnapshot,
 } from "./contract.js";
 import type { CreationWindow } from "./detect.js";
 import { hotForMs, touchThrottleMs } from "./pull-state.js";
@@ -50,6 +50,13 @@ const migrations = [
     after_seq INTEGER NOT NULL,
     PRIMARY KEY (server, thread_id)
   )`,
+  // Development builds of 1.1.0 kept state for pull requests only, in
+  // snapshots without a kind.
+  `ALTER TABLE pull_states RENAME TO item_states`,
+  `UPDATE item_states SET snapshot = json_set(snapshot, '$.kind', 'pr')
+    WHERE snapshot IS NOT NULL AND json_extract(snapshot, '$.kind') IS NULL`,
+  `INSERT OR IGNORE INTO item_states (server, repo_key, number)
+    SELECT DISTINCT server, repo_key, number FROM thread_items`,
 ];
 
 export type ItemId = { repoKey: string; number: number };
@@ -64,8 +71,8 @@ export type NewLink = ItemId & {
   window: CreationWindow | null;
 };
 
-export type PullState = {
-  snapshot: PullSnapshot | null;
+export type ItemState = {
+  snapshot: ItemSnapshot | null;
   dueAt: number | null;
   touchedAt: number | null;
   failures: number;
@@ -74,7 +81,9 @@ export type PullState = {
   resets: number;
 };
 
-export type StoredLink = Omit<NewLink, "window"> & { state: PullState | null };
+export type DueItem = ItemId & ItemState & { kind: ItemKind };
+
+export type StoredLink = Omit<NewLink, "window"> & { state: ItemState | null };
 
 const linkRowSchema = z.object({
   thread_id: z.string(),
@@ -95,16 +104,16 @@ const stateRowSchema = z.object({
   resets: z.number(),
 });
 const joinedRowSchema = linkRowSchema.extend({ state_present: z.string().nullable() });
-const dueRowSchema = stateRowSchema.extend({ repo_key: z.string(), number: z.number() });
+const dueRowSchema = stateRowSchema.extend({ repo_key: z.string(), number: z.number(), kind: z.enum(["issue", "pr"]) });
 const sourceRowSchema = z.object({ source: z.enum(linkSources) });
 
-function parseSnapshot(raw: string | null): PullSnapshot | null {
+function parseSnapshot(raw: string | null): ItemSnapshot | null {
   if (raw === null) return null;
-  const parsed = pullSnapshotSchema.safeParse(JSON.parse(raw));
+  const parsed = itemSnapshotSchema.safeParse(JSON.parse(raw));
   return parsed.success ? parsed.data : null;
 }
 
-function pullState(row: z.infer<typeof stateRowSchema>): PullState {
+function itemState(row: z.infer<typeof stateRowSchema>): ItemState {
   return {
     snapshot: parseSnapshot(row.snapshot),
     dueAt: row.due_at,
@@ -134,7 +143,15 @@ const sameItem = `server = @server AND repo_key = @repoKey AND number = @number`
 const unconfirmed = `source = 'opened' AND created_from IS NOT NULL`;
 const outsideWindow = `(@createdAt < created_from OR @createdAt > created_to)`;
 
-/** The plugin's thread link, pull request state, and scan cursor tables, scoped by Gitea server. */
+/** Unconfirmed `opened` rows matching `condition` take their fallback source; `rejectCandidate` deletes the rest. */
+const promoteFallback = (condition: string) => `
+  UPDATE thread_items SET source = fallback_source, account = fallback_account,
+    fallback_source = NULL, fallback_account = NULL, created_from = NULL, created_to = NULL
+  WHERE ${sameItem} AND ${unconfirmed} AND ${condition} AND fallback_source IS NOT NULL`;
+const rejectCandidate = (condition: string) =>
+  `DELETE FROM thread_items WHERE ${sameItem} AND ${unconfirmed} AND ${condition}`;
+
+/** The plugin's thread link, item state, and scan cursor tables, scoped by Gitea server. */
 export function openStore(
   storage: Pick<BbPluginApi["storage"], "database" | "migrate">,
 ) {
@@ -163,44 +180,46 @@ export function openStore(
       SELECT thread_id FROM thread_items
       WHERE server = ? AND repo_key = ? AND number = ? AND source IN ('sent', 'auto-fixer', 'linked')
       ORDER BY linked_at DESC, rowid DESC LIMIT 1`),
-    promoteFallback: db.prepare(`
-      UPDATE thread_items SET source = fallback_source, account = fallback_account,
-        fallback_source = NULL, fallback_account = NULL, created_from = NULL, created_to = NULL
-      WHERE ${sameItem} AND ${unconfirmed} AND ${outsideWindow} AND fallback_source IS NOT NULL`),
-    rejectOutside: db.prepare(
-      `DELETE FROM thread_items WHERE ${sameItem} AND ${unconfirmed} AND ${outsideWindow}`,
-    ),
+    promoteOutside: db.prepare(promoteFallback(outsideWindow)),
+    rejectOutside: db.prepare(rejectCandidate(outsideWindow)),
+    promoteAll: db.prepare(promoteFallback("1")),
+    rejectAll: db.prepare(rejectCandidate("1")),
     confirmInside: db.prepare(`
       UPDATE thread_items SET created_from = NULL, created_to = NULL, fallback_source = NULL, fallback_account = NULL
       WHERE ${sameItem} AND ${unconfirmed}`),
     insertState: db.prepare(
-      `INSERT OR IGNORE INTO pull_states (server, repo_key, number) VALUES (?, ?, ?)`,
+      `INSERT OR IGNORE INTO item_states (server, repo_key, number) VALUES (?, ?, ?)`,
     ),
     selectState: db.prepare(
-      `SELECT * FROM pull_states WHERE server = ? AND repo_key = ? AND number = ?`,
+      `SELECT * FROM item_states WHERE server = ? AND repo_key = ? AND number = ?`,
     ),
-    duePulls: db.prepare(`
-      SELECT * FROM pull_states s
-      WHERE s.server = ? AND s.due_at IS NOT NULL AND s.due_at <= ?
-        AND EXISTS (SELECT 1 FROM thread_items l WHERE l.server = s.server AND l.repo_key = s.repo_key AND l.number = s.number)
-      ORDER BY s.due_at LIMIT ?`),
+    // A number linked both ways is read as a pull request; Gitea answers a
+    // wrong kind with an error the row shows.
+    dueItems: db.prepare(`
+      SELECT * FROM (
+        SELECT s.*, (SELECT MAX(l.kind) FROM thread_items l
+          WHERE l.server = s.server AND l.repo_key = s.repo_key AND l.number = s.number) AS kind
+        FROM item_states s
+        WHERE s.server = ? AND s.due_at IS NOT NULL AND s.due_at <= ?
+      ) WHERE kind IS NOT NULL
+      ORDER BY due_at LIMIT ?`),
     saveSnapshot: db.prepare(`
-      INSERT INTO pull_states (server, repo_key, number, snapshot, checked_at, due_at, failures, error)
+      INSERT INTO item_states (server, repo_key, number, snapshot, checked_at, due_at, failures, error)
       VALUES (@server, @repoKey, @number, @snapshot, @checkedAt, @dueAt, 0, NULL)
       ON CONFLICT (server, repo_key, number) DO UPDATE SET
         snapshot = excluded.snapshot, checked_at = excluded.checked_at, failures = 0, error = NULL,
         due_at = CASE WHEN resets = @resets THEN excluded.due_at ELSE due_at END`),
     saveFailure: db.prepare(`
-      UPDATE pull_states SET failures = @failures, error = @error,
+      UPDATE item_states SET failures = @failures, error = @error,
         due_at = CASE WHEN resets = @resets THEN @dueAt ELSE due_at END
       WHERE ${sameItem}`),
     touch: db.prepare(`
-      UPDATE pull_states SET
+      UPDATE item_states SET
         due_at = CASE WHEN due_at IS NOT NULL AND (touched_at IS NULL OR touched_at < @cold) THEN MIN(due_at, @now) ELSE due_at END,
         touched_at = @now
       WHERE ${sameItem} AND (touched_at IS NULL OR touched_at < @recent)`),
     expire: db.prepare(
-      `UPDATE pull_states SET due_at = 0, resets = resets + 1 WHERE ${sameItem}`,
+      `UPDATE item_states SET due_at = 0, resets = resets + 1 WHERE ${sameItem}`,
     ),
     readCursor: db.prepare(
       `SELECT after_seq FROM scan_cursors WHERE server = ? AND thread_id = ?`,
@@ -213,9 +232,9 @@ export function openStore(
     ),
   };
 
-  function readState(server: string, item: ItemId): PullState | null {
+  function readState(server: string, item: ItemId): ItemState | null {
     const row = sql.selectState.get(server, item.repoKey, item.number);
-    return row === undefined ? null : pullState(stateRowSchema.parse(row));
+    return row === undefined ? null : itemState(stateRowSchema.parse(row));
   }
 
   function addLinks(server: string, links: readonly NewLink[]): NewLink[] {
@@ -236,10 +255,9 @@ export function openStore(
       });
       if (changes === 0) continue;
       added.push(link);
-      if (link.kind !== "pr") continue;
       sql.insertState.run(server, link.repoKey, link.number);
       const known = readState(server, link)?.snapshot;
-      if (known) settleWindows(server, link, Date.parse(known.createdAt));
+      if (known?.kind === "pr") settleWindows(server, link, Date.parse(known.createdAt));
     }
     return added;
   }
@@ -252,7 +270,7 @@ export function openStore(
    */
   function settleWindows(server: string, item: ItemId, createdAt: number): number {
     const keys = { server, repoKey: item.repoKey, number: item.number, createdAt };
-    const changed = sql.promoteFallback.run(keys).changes + sql.rejectOutside.run(keys).changes;
+    const changed = sql.promoteOutside.run(keys).changes + sql.rejectOutside.run(keys).changes;
     sql.confirmInside.run(keys);
     return changed;
   }
@@ -288,7 +306,7 @@ export function openStore(
         .prepare(`
           SELECT l.*, s.server AS state_present, s.snapshot, s.due_at, s.touched_at, s.failures, s.error, s.resets
           FROM thread_items l
-          LEFT JOIN pull_states s ON s.server = l.server AND s.repo_key = l.repo_key AND s.number = l.number
+          LEFT JOIN item_states s ON s.server = l.server AND s.repo_key = l.repo_key AND s.number = l.number
           WHERE l.server = ? AND l.thread_id IN (${placeholders(threadIds.length)})
           ORDER BY l.linked_at DESC, l.rowid DESC`)
         .all(server, ...threadIds)
@@ -296,7 +314,7 @@ export function openStore(
           const row = joinedRowSchema.parse(raw);
           return {
             ...storedLink(row),
-            state: row.state_present === null ? null : pullState(stateRowSchema.parse(raw)),
+            state: row.state_present === null ? null : itemState(stateRowSchema.parse(raw)),
           };
         });
     },
@@ -322,23 +340,23 @@ export function openStore(
       sql.deleteCursor.run(server, threadId);
     },
 
-    /** Pull requests linked to some thread whose refresh is due, soonest first. */
-    duePulls: (server: string, now: number, limit: number): (ItemId & PullState)[] =>
-      sql.duePulls.all(server, now, limit).map((raw: unknown) => {
+    /** Items linked to some thread whose refresh is due, soonest first. */
+    dueItems: (server: string, now: number, limit: number): DueItem[] =>
+      sql.dueItems.all(server, now, limit).map((raw: unknown) => {
         const row = dueRowSchema.parse(raw);
-        return { repoKey: row.repo_key, number: row.number, ...pullState(row) };
+        return { repoKey: row.repo_key, number: row.number, kind: row.kind, ...itemState(row) };
       }),
 
     /**
-     * Records a successful read and settles `opened` candidates against its
-     * creation time. `resets` is the row's count when the read began; if the
+     * Records a successful read and settles a pull request's `opened`
+     * candidates against its creation time. `resets` is the row's count when the read began; if the
      * plugin expired the row since, its due time stays. Returns whether a link
      * changed source or was deleted.
      */
     saveSnapshot: (
       server: string,
       item: ItemId,
-      read: { snapshot: PullSnapshot; checkedAt: number; dueAt: number | null; resets: number },
+      read: { snapshot: ItemSnapshot; checkedAt: number; dueAt: number | null; resets: number },
     ) =>
       db.transaction(() => {
         sql.saveSnapshot.run({
@@ -350,15 +368,25 @@ export function openStore(
           dueAt: read.dueAt,
           resets: read.resets,
         });
-        return settleWindows(server, item, Date.parse(read.snapshot.createdAt)) > 0;
+        return read.snapshot.kind === "pr" && settleWindows(server, item, Date.parse(read.snapshot.createdAt)) > 0;
       })(),
+
+    /**
+     * Gitea has no such pull request, so no thread created it: every
+     * unconfirmed `opened` row of it takes its fallback source, or is deleted
+     * when it has none. Returns whether a link changed source or was deleted.
+     */
+    rejectCandidates(server: string, item: ItemId): boolean {
+      const keys = { server, repoKey: item.repoKey, number: item.number };
+      return db.transaction(() => sql.promoteAll.run(keys).changes + sql.rejectAll.run(keys).changes)() > 0;
+    },
 
     saveFailure(server: string, item: ItemId, failure: { failures: number; error: string; dueAt: number | null; resets: number }) {
       sql.saveFailure.run({ server, repoKey: item.repoKey, number: item.number, ...failure });
     },
 
     /**
-     * Marks pull requests as looked at, at most once per `touchThrottleMs` per
+     * Marks items as looked at, at most once per `touchThrottleMs` per
      * row. A row that was not hot becomes due now, so a thread someone opens
      * refreshes promptly. Returns whether any of them is due.
      */
@@ -373,7 +401,7 @@ export function openStore(
         return due;
       })(),
 
-    /** The plugin changed this pull request, so read it again on the next sweep. */
+    /** The plugin changed this item, so read it again on the next sweep. */
     expire(server: string, item: ItemId) {
       sql.expire.run({ server, repoKey: item.repoKey, number: item.number });
     },

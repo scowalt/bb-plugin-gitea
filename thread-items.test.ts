@@ -71,7 +71,8 @@ async function startItems(options: {
   const pulls = new Map<number, Record<string, unknown>>();
   const statuses = new Map<string, string>();
   const issues = new Set<number>();
-  const gitea = { pulls, statuses, issues, failing: new Set<number>() };
+  const closedIssues = new Set<number>();
+  const gitea = { pulls, statuses, issues, closedIssues, failing: new Set<number>() };
   const { host, calls } = await start(
     (call) => {
       const custom = options.api?.(call);
@@ -86,12 +87,23 @@ async function startItems(options: {
       }
       const status = path.match(/\/repos\/acme\/widgets\/commits\/([0-9a-f]+)\/status$/);
       if (status)
-        return { json: { state: statuses.get(status[1]!) ?? "pending", total_count: 1 } };
+        return {
+          json: { total_count: 1, statuses: [{ context: "build", status: statuses.get(status[1]!) ?? "pending", target_url: "" }] },
+        };
       const issue = path.match(/\/repos\/acme\/widgets\/issues\/(\d+)$/);
       if (issue) {
         const number = Number(issue[1]);
         if (pulls.has(number)) return { json: { number, pull_request: { merged: false } } };
-        return issues.has(number) ? { json: { number } } : { status: 404 };
+        if (!issues.has(number)) return { status: 404 };
+        return {
+          json: {
+            number,
+            title: `Issue ${number}`,
+            html_url: `${server}acme/widgets/issues/${number}`,
+            state: closedIssues.has(number) ? "closed" : "open",
+            pull_request: null,
+          },
+        };
       }
       return { json: [] };
     },
@@ -336,7 +348,7 @@ it("rescans from the start after a scan already in flight, even when another sta
   expect(reads.slice(2)).toContain("0");
 });
 
-it("shows a pull request's state once the refresher reads it, and the error of one it cannot read", { timeout: 60_000 }, async () => {
+it("shows a pull request's state once the refresher reads it, and drops one a command named that Gitea has never had", { timeout: 60_000 }, async () => {
   const { host, calls, gitea } = await startItems({
     events: { "thr-a": [...create(1, t0, 9, 8), ...push(3, t0 + minute, 9)] },
   });
@@ -347,12 +359,11 @@ it("shows a pull request's state once the refresher reads it, and the error of o
   await eventually(async () => {
     const items = await view(host, "thr-a");
     expect(items.pulls.map(({ number, via, error, state }) => ({ number, via, error, state: state?.lifecycle.state ?? null }))).toEqual([
-      { number: 8, via: { type: "own", source: "opened" }, error: expect.stringContaining("404"), state: null },
       { number: 9, via: { type: "own", source: "opened" }, error: null, state: "open" },
     ]);
-    expect(items.summary).toMatchObject({ total: 2, open: 1, unreadable: 1, checking: 0 });
+    expect(items.summary).toMatchObject({ total: 1, open: 1, unreadable: 0, checking: 0 });
   });
-  expect(pullReads(calls)).toBeGreaterThanOrEqual(2);
+  expect(calls.filter((call) => call.endpoint.endsWith("/pulls/8"))).toHaveLength(1);
   expect(calls.every((call) => call.method === "GET")).toBe(true);
 });
 
@@ -392,7 +403,7 @@ it("copies the old kv link stores into the table, keeps the keys, and marks the 
   expect(shown(multi)).toEqual([{ ref: "acme/widgets#44", state: "checking", links: ["sent"] }]);
   expect([multi.pulls[0]!.links[0]!.linkedAt, multi.issues]).toEqual([
     0,
-    [{ repo: "acme/widgets", number: 7, url: `${server}acme/widgets/issues/7`, source: "sent", linkedAt: 0 }],
+    [{ repo: "acme/widgets", number: 7, url: `${server}acme/widgets/issues/7`, state: null, error: null, stale: false, source: "sent", linkedAt: 0 }],
   ]);
   expect(shown(await view(restarted, "legacy-9"))).toEqual([{ ref: "Acme/Widgets#9", state: "checking", links: ["sent"] }]);
   expect(restarted.harness.inspection.logEntries.map((entry) => entry.message)).toEqual(
@@ -435,6 +446,7 @@ it("links, lists, and unlinks issues and pull requests from the CLI for this thr
   await expect(cli(["link", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Linked pr acme/widgets#9 to thr-a." });
   expect(calls.map((call) => call.endpoint)).toEqual(["/api/v1/repos/acme/widgets/pulls/9"]);
   await expect(cli(["link", url(10), "--thread", "thr-b"])).resolves.toMatchObject({ exitCode: 0, stdout: "Linked pr acme/widgets#10 to thr-b." });
+  expect(calls.map((call) => call.endpoint)).toEqual(["/api/v1/repos/acme/widgets/pulls/9", "/api/v1/repos/acme/widgets/pulls/10"]);
   await expect(cli(["link", "pr", "acme/widgets", "9"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "pr acme/widgets#9 was already linked to thr-a." });
   await expect(cli(["link", "issue", "acme/widgets", "4"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Linked issue acme/widgets#4 to thr-a." });
   await expect(cli(["link", `${server}acme/widgets/issues/4`], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "issue acme/widgets#4 was already linked to thr-a." });
@@ -453,7 +465,8 @@ it("links, lists, and unlinks issues and pull requests from the CLI for this thr
   const json = await cli(["thread", "thr-b", "--json"]);
   expect(giteaRpcContract.threadItems.output.parse(JSON.parse(json.stdout ?? "")).pulls[0]).toMatchObject({
     number: 10,
-    state: { lifecycle: { state: "open", ci: "passing" } },
+    state: null,
+    error: null,
     via: { type: "own", source: "linked" },
   });
   expect(calls).toHaveLength(reads);

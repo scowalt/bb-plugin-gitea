@@ -46,6 +46,7 @@
     "pull-files-view.ts",
     "auto-fixer.ts",
     "repository.ts",
+    "gitea-errors.ts",
     "draft-title.ts",
     "item-status.ts",
     "issue-blockers.ts",

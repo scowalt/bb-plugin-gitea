@@ -53,7 +53,11 @@ function describe(view: ThreadItemsView): string {
         .filter(Boolean)
         .join("  "),
     ),
-    ...view.issues.map((issue) => `issue     ${issue.repo}#${issue.number}  (${issue.source})`),
+    ...view.issues.map((issue) =>
+      ["issue   ", `${issue.repo}#${issue.number}`, issue.state?.title ?? issue.error, `(${issue.source})`]
+        .filter(Boolean)
+        .join("  "),
+    ),
   ];
   if (lines.length === 0) lines.push("No Gitea pull requests are linked to this thread.");
   if (view.scanning) lines.push("Still reading this thread's history; run the command again for the rest.");

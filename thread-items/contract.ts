@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ciStatusSchema, reviewStatusSchema } from "../item-status.js";
 import { repositorySchema } from "../repository.js";
 
 export const linkSources = ["sent", "auto-fixer", "opened", "pushed", "linked"] as const;
@@ -21,10 +22,8 @@ export const threadLinkSchema = itemRefSchema
   .strict();
 export type ThreadLink = z.infer<typeof threadLinkSchema>;
 
-export const ciStateSchema = z.enum(["none", "running", "passing", "failing"]);
-export type CiState = z.infer<typeof ciStateSchema>;
-
 export const pullSnapshotSchema = z.object({
+  kind: z.literal("pr"),
   title: z.string(),
   url: z.string(),
   createdAt: z.string(),
@@ -33,13 +32,26 @@ export const pullSnapshotSchema = z.object({
       state: z.literal("open"),
       draft: z.boolean(),
       headSha: z.string().nullable(),
-      ci: ciStateSchema,
+      ci: ciStatusSchema,
+      review: reviewStatusSchema,
     }),
     z.object({ state: z.literal("merged"), mergedAt: z.string() }),
     z.object({ state: z.literal("closed"), closedAt: z.string() }),
   ]),
 });
 export type PullSnapshot = z.infer<typeof pullSnapshotSchema>;
+
+export const issueSnapshotSchema = z.object({
+  kind: z.literal("issue"),
+  title: z.string(),
+  url: z.string(),
+  state: z.enum(["open", "closed"]),
+});
+export type IssueSnapshot = z.infer<typeof issueSnapshotSchema>;
+
+/** What the refresher last read of a linked item. */
+export const itemSnapshotSchema = z.discriminatedUnion("kind", [pullSnapshotSchema, issueSnapshotSchema]);
+export type ItemSnapshot = z.infer<typeof itemSnapshotSchema>;
 
 export const threadPullSchema = z.object({
   repo: z.string(),
@@ -70,6 +82,11 @@ export const threadIssueSchema = z.object({
   repo: z.string(),
   number: itemNumber,
   url: z.string(),
+  state: issueSnapshotSchema.nullable(),
+  /** Why the last read failed, while reads are failing. */
+  error: z.string().nullable(),
+  /** The last read failed, so `state` is the last one read. */
+  stale: z.boolean(),
   source: linkSourceSchema,
   linkedAt: z.number(),
 });

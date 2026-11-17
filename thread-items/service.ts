@@ -1,8 +1,8 @@
 import type { BbPluginApi, PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { itemKey, repoKey } from "../auto-fixer.js";
 import type {
-  CiState,
   ItemKind,
+  ItemSnapshot,
   LinkSource,
   PullSnapshot,
   ThreadIssue,
@@ -12,10 +12,10 @@ import type {
   threadItemsRpcMethods,
 } from "./contract.js";
 import { importLegacy } from "./legacy-import.js";
-import { summarize } from "./pull-state.js";
+import { readPull, summarize, type PullFacts } from "./pull-state.js";
 import { createRefresher } from "./refresher.js";
 import { createScanner } from "./scanner.js";
-import { openStore, type ItemId, type NewLink, type StoredLink } from "./store.js";
+import { openStore, type ItemId, type ItemState, type NewLink, type StoredLink } from "./store.js";
 
 /** What the thread items service needs from the Gitea side of the plugin. */
 export interface GiteaReads {
@@ -23,9 +23,10 @@ export interface GiteaReads {
   server(): string;
   /** The display account the plugin scopes lists and badges to. */
   account(): Promise<string>;
-  /** `pulls/{n}` JSON. Throws when Gitea cannot answer. */
-  pull(repo: string, number: number, signal?: AbortSignal): Promise<unknown>;
-  ci(repo: string, sha: string, signal?: AbortSignal): Promise<CiState>;
+  /** The JSON of one repository API path, such as `pulls/9`. Throws `GiteaNotFoundError` on a 404, and another error when Gitea cannot answer. */
+  get(repo: string, path: string, signal?: AbortSignal): Promise<unknown>;
+  /** Makes a link Gitea returned absolute on the server, or empty when it is not a safe link. */
+  resolveUrl(value: string): string;
   /** Whether `issues/{n}` is an issue or a pull request. */
   kind(repo: string, number: number): Promise<ItemKind>;
 }
@@ -52,6 +53,13 @@ const message = (error: unknown) =>
 
 function itemOf(repo: string, number: number): ItemId {
   return { repoKey: repoKey(repo), number };
+}
+
+/** The last read of an item, as a view shows it. A snapshot of the other kind is not shown. */
+function shown<K extends ItemKind>(state: ItemState | null, kind: K) {
+  const snapshot = state?.snapshot?.kind === kind ? (state.snapshot as Extract<ItemSnapshot, { kind: K }>) : null;
+  const failing = state !== null && state.failures > 0;
+  return { state: snapshot, error: failing ? state.error : null, stale: failing && snapshot !== null };
 }
 
 /** Whether the plugin's badges show this source: threads it started or someone linked. */
@@ -138,14 +146,11 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   function pullOf(server: string, root: string, titles: Map<string, string | null>, rows: PullRows): ThreadPull {
     const [first] = rows;
     const own = rows.find((row) => row.threadId === root);
-    const { state } = first;
     return {
       repo: (own ?? first).repo,
       number: first.number,
       url: `${server}${(own ?? first).repo}/pulls/${first.number}`,
-      state: state?.snapshot ?? null,
-      error: state && state.snapshot === null && state.failures > 0 ? state.error : null,
-      stale: state !== null && state.snapshot !== null && state.failures > 0,
+      ...shown(first.state, "pr"),
       via: own
         ? { type: "own", source: own.source }
         : { type: "child", threadId: first.threadId, threadTitle: titles.get(first.threadId) ?? null },
@@ -174,6 +179,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
             repo: row.repo,
             number: row.number,
             url: `${server}${row.repo}/issues/${row.number}`,
+            ...shown(row.state, "issue"),
             source: row.source,
             linkedAt: row.linkedAt,
           });
@@ -185,7 +191,8 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       else byPull.set(key, [row]);
     }
     const pulls = [...byPull.values()].map((rows) => pullOf(server, threadId, titles, rows));
-    if (store.touch(server, pulls.map((pull) => itemOf(pull.repo, pull.number)), Date.now()))
+    const items = [...pulls, ...issues];
+    if (store.touch(server, items.map((entry) => itemOf(entry.repo, entry.number)), Date.now()))
       refresher.wake();
     return {
       threadId,
@@ -231,16 +238,21 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
       const server = gitea.server();
       const item = itemOf(repo, number);
       const [account] = await Promise.all([gitea.account(), requireThread(threadId)]);
-      let read: { snapshot: PullSnapshot; resets: number } | null = null;
+      // A merged or closed pull request is complete from `pulls/{n}` alone;
+      // the refresher reads an open one's reviews and CI.
+      let settled: PullSnapshot | null = null;
       if (kind === "pr") {
-        const previous = store.readState(server, item);
+        let facts: PullFacts;
         try {
-          read = { snapshot: await refresher.read(repo, number, previous?.snapshot ?? null), resets: previous?.resets ?? 0 };
+          const read = readPull(await gitea.get(repo, `pulls/${number}`));
+          if (!read) throw new Error("Gitea returned an unrecognized pull request.");
+          facts = read;
         } catch (error) {
           if ((await gitea.kind(repo, number).catch(() => null)) === "issue")
             throw new Error(`${repo}#${number} is an issue; link it as issue.`);
           throw new Error(`Could not read pull request ${repo}#${number} on ${server}: ${message(error)}`);
         }
+        if (facts.lifecycle.state !== "open") settled = { ...facts, lifecycle: facts.lifecycle };
       } else {
         let actual: ItemKind;
         try {
@@ -254,9 +266,11 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
         threadId, repo, ...item, kind, source: "linked", account,
         linkedAt: Date.now(), window: null,
       }]);
-      if (read) refresher.saveRead(server, item, read.snapshot, read.resets);
+      if (settled) refresher.saveRead(server, item, settled, store.readState(server, item)?.resets ?? 0);
+      else store.expire(server, item);
+      refresher.wake();
       if (changes.length === 0) {
-        if (read) publish();
+        if (settled) publish();
         return { result: "already" };
       }
       linkChanged("linked", kind, repo, number);

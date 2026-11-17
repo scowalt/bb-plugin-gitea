@@ -31,6 +31,7 @@ function link(source: LinkSource, overrides: Partial<NewLink> = {}): NewLink {
   };
 }
 const snapshot = (created: number): PullSnapshot => ({
+  kind: "pr",
   title: "Change",
   url: `${server}acme/widgets/pulls/9`,
   createdAt: new Date(created).toISOString(),

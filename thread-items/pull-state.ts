@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { parseLifecycle } from "../auto-fixer.js";
 import { isDraftTitle } from "../draft-title.js";
+import { parsePull } from "../item-status.js";
 import type {
-  CiState,
+  IssueSnapshot,
+  ItemSnapshot,
   PullSnapshot,
   ThreadItemsSummary,
   ThreadPull,
@@ -13,15 +15,16 @@ const pullFieldsSchema = z.object({
   html_url: z.string(),
   created_at: z.string(),
   draft: z.boolean().optional(),
-  head: z.object({ sha: z.string() }).nullish(),
 });
 
 type OpenLifecycle = Extract<PullSnapshot["lifecycle"], { state: "open" }>;
 type SettledLifecycle = Exclude<PullSnapshot["lifecycle"], OpenLifecycle>;
 
-/** A pull request as `pulls/{n}` describes it, before its CI is known. */
+/** A pull request as `pulls/{n}` describes it, before its review and CI are read. */
 export type PullFacts = Omit<PullSnapshot, "lifecycle"> & {
-  lifecycle: Omit<OpenLifecycle, "ci"> | SettledLifecycle;
+  lifecycle:
+    | (Omit<OpenLifecycle, "ci" | "review"> & { requested: string[] })
+    | SettledLifecycle;
 };
 
 /** Gitea's `pulls/{n}` JSON, or null when it is not a recognisable pull request. */
@@ -29,44 +32,41 @@ export function readPull(raw: unknown): PullFacts | null {
   const fields = pullFieldsSchema.safeParse(raw);
   const lifecycle = parseLifecycle(raw);
   if (!fields.success || !lifecycle) return null;
-  const { title, html_url: url, created_at: createdAt, draft, head } = fields.data;
+  const { title, html_url: url, created_at: createdAt, draft } = fields.data;
+  if (lifecycle.state !== "open") return { kind: "pr", title, url, createdAt, lifecycle };
+  const { headSha, requested } = parsePull(raw);
   return {
+    kind: "pr",
     title,
     url,
     createdAt,
-    lifecycle:
-      lifecycle.state === "open"
-        ? {
-            state: "open",
-            draft: draft === true || isDraftTitle(title),
-            headSha: head?.sha || null,
-          }
-        : lifecycle,
+    lifecycle: {
+      state: "open",
+      draft: draft === true || isDraftTitle(title),
+      headSha: headSha || null,
+      requested,
+    },
   };
 }
 
-/** The snapshot of `facts`; `ci` is used only when the pull request is open. */
-export function snapshotOf(facts: PullFacts, ci: CiState): PullSnapshot {
-  return facts.lifecycle.state === "open"
-    ? { ...facts, lifecycle: { ...facts.lifecycle, ci } }
-    : { ...facts, lifecycle: facts.lifecycle };
+const issueFieldsSchema = z.object({
+  title: z.string(),
+  html_url: z.string(),
+  state: z.enum(["open", "closed"]),
+  pull_request: z.null().optional(),
+});
+
+/** Gitea's `issues/{n}` JSON, or null when it is not an issue. */
+export function readIssue(raw: unknown): IssueSnapshot | null {
+  const fields = issueFieldsSchema.safeParse(raw);
+  if (!fields.success) return null;
+  const { title, html_url: url, state } = fields.data;
+  return { kind: "issue", title, url, state };
 }
 
-const finalCi = new Set<CiState>(["passing", "failing"]);
-
-/** The stored CI of an open pull request when its head has not moved and the result was final. */
-export function reusableCi(
-  previous: PullSnapshot | null,
-  headSha: string,
-): CiState | null {
-  if (previous?.lifecycle.state !== "open") return null;
-  const { ci, headSha: previousSha } = previous.lifecycle;
-  return previousSha === headSha && finalCi.has(ci) ? ci : null;
-}
-
-/** A pull request someone looked at this recently is hot and refreshes on the short interval. */
+/** An item someone looked at this recently is hot and refreshes on the short interval. */
 export const hotForMs = 5 * 60_000;
-/** A view records that it looked at a pull request at most this often. */
+/** A view records that it looked at an item at most this often. */
 export const touchThrottleMs = 60_000;
 
 export const isHot = (touchedAt: number | null, now: number) =>
@@ -79,28 +79,29 @@ const closedColdMs = 6 * 60 * 60_000;
 const failureBaseMs = 30_000;
 const failureMaxMs = 60 * 60_000;
 
+/** An issue's or a pull request's state. */
+function stateOf(snapshot: ItemSnapshot): "open" | "closed" | "merged" {
+  return snapshot.kind === "issue" ? snapshot.state : snapshot.lifecycle.state;
+}
+
 /**
- * When the refresher should next read a pull request; null means never.
+ * When the refresher should next read an item; null means never.
  * `failures` counts consecutive failed reads, including the one just made.
  */
 export function nextDueAt(
-  snapshot: PullSnapshot | null,
+  snapshot: ItemSnapshot | null,
   { hot, failures, now }: { hot: boolean; failures: number; now: number },
 ): number | null {
   if (failures > 0)
     return now + Math.min(failureBaseMs * 2 ** failures, failureMaxMs);
   if (!snapshot) return now;
-  switch (snapshot.lifecycle.state) {
+  switch (stateOf(snapshot)) {
     case "merged":
       return null;
     case "closed":
       return now + (hot ? closedHotMs : closedColdMs);
     case "open":
       return now + (hot ? openHotMs : openColdMs);
-    default: {
-      const _exhaustive: never = snapshot.lifecycle;
-      return _exhaustive;
-    }
   }
 }
 
@@ -122,9 +123,9 @@ export function summarize(pulls: readonly ThreadPull[]): ThreadItemsSummary {
     }
     const { lifecycle } = state;
     summary[lifecycle.state] += 1;
-    if (lifecycle.state === "open" && lifecycle.ci === "failing")
+    if (lifecycle.state === "open" && lifecycle.ci.kind === "failing")
       summary.ciFailing += 1;
-    if (lifecycle.state === "open" && lifecycle.ci === "running")
+    if (lifecycle.state === "open" && lifecycle.ci.kind === "running")
       summary.ciRunning += 1;
   }
   return summary;

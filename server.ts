@@ -89,6 +89,11 @@ import {
   type ResumableSession,
 } from "./auto-fixer.js";
 import {
+  GiteaAccessError,
+  GiteaAuthenticationError,
+  GiteaNotFoundError,
+} from "./gitea-errors.js";
+import {
   isThreadItemsCommand,
   itemRefSchema,
   registerThreadItems,
@@ -612,9 +617,7 @@ function pickItems(page: ItemPage, query: string) {
 }
 
 /** Badge state of an open pull request from its head commit's combined status. */
-export function pullCiStatus(
-  combined: Record<string, unknown>,
-): Extract<PullStatus, "none" | "passing" | "failing" | "running"> {
+export function pullCiStatus(combined: Record<string, unknown>): PullStatus {
   if (Number(combined.total_count) === 0) return "none";
   switch (checkStatus(text(combined.state))) {
     case "success":
@@ -627,9 +630,6 @@ export function pullCiStatus(
       return "none";
   }
 }
-
-class GiteaAccessError extends Error {}
-class GiteaAuthenticationError extends GiteaAccessError {}
 
 function safeLink(base: URL, value: unknown): string {
   if (typeof value !== "string") return "";
@@ -1090,7 +1090,8 @@ export default async function plugin(bb: BbPluginApi) {
         `Gitea rejected tea login profile "${login}". Sign in again with \`tea login add\`.`,
       );
     }
-    if (status === 403 || status === 404)
+    if (status === 404) throw new GiteaNotFoundError(`Gitea API returned HTTP ${status}.`);
+    if (status === 403)
       throw new GiteaAccessError(`Gitea API returned HTTP ${status}.`);
     if (status < 200 || status >= 300)
       throw new Error(`Gitea API returned HTTP ${status}.`);
@@ -1174,18 +1175,6 @@ export default async function plugin(bb: BbPluginApi) {
       ? null
       : await pullDiff(repo, number, signal);
     return { files, raw, truncated: page.truncated };
-  }
-
-  async function readCiStatus(repo: string, sha: string, signal?: AbortSignal) {
-    const combined = await api(
-      repoPath(repo, `commits/${encodeURIComponent(sha)}/status`),
-      { signal },
-    );
-    return pullCiStatus(
-      typeof combined === "object" && combined !== null && !Array.isArray(combined)
-        ? (combined as Record<string, unknown>)
-        : {},
-    );
   }
 
   async function displayAccount() {
@@ -1777,9 +1766,8 @@ export default async function plugin(bb: BbPluginApi) {
   const threadItems = await registerThreadItems(bb, {
     server: () => cleanBaseUrl(config.baseUrl).href,
     account: displayAccount,
-    pull: (repo, number, signal) =>
-      api(repoPath(repo, `pulls/${number}`), { signal }),
-    ci: readCiStatus,
+    get: (repo, path, signal) => api(repoPath(repo, path), { signal }),
+    resolveUrl: (value) => safeLink(cleanBaseUrl(config.baseUrl), value),
     async kind(repo, number) {
       const issue = record(await api(repoPath(repo, `issues/${number}`)));
       return issue.pull_request ? "pr" : "issue";
@@ -2804,7 +2792,17 @@ export default async function plugin(bb: BbPluginApi) {
         })),
       };
     },
-    readCiStatus,
+    async readCiStatus(repo, sha, signal) {
+      const combined = await api(
+        repoPath(repo, `commits/${encodeURIComponent(sha)}/status`),
+        { signal },
+      );
+      return pullCiStatus(
+        typeof combined === "object" && combined !== null && !Array.isArray(combined)
+          ? (combined as Record<string, unknown>)
+          : {},
+      );
+    },
   });
   const handlers = {
     ...branchHandlers,
