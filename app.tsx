@@ -24,6 +24,8 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginRpcClient, PluginRpcResult } from "@get-bb/plugin-sdk/app";
 import type { giteaRpcContract } from "./server.js";
+import type { CiStatus, ReviewStatus } from "./item-status.js";
+import { cn } from "@/lib/utils";
 import { GITEA_BRANCH_ENVIRONMENT_PROVIDER_ID } from "./branch-inputs.js";
 import { issueReferences } from "./issue-references.js";
 import { GiteaBranchInputsControl } from "./environment-picker.js";
@@ -2822,24 +2824,6 @@ function sameLogin(author: string, login: string | null | undefined) {
   return !!login && author.toLowerCase() === login.toLowerCase();
 }
 
-function useViewerLogin() {
-  const rpc = useRpc<typeof giteaRpcContract>();
-  const [login, setLogin] = useState<string | null>(null);
-  useEffect(() => {
-    let current = true;
-    void rpc
-      .call("status", null)
-      .then((value) => {
-        if (current) setLogin(value.state === "connected" ? value.login : null);
-      })
-      .catch(() => {});
-    return () => {
-      current = false;
-    };
-  }, [rpc]);
-  return login;
-}
-
 function useRepoOptions(repo: string | null) {
   const rpc = useRpc<typeof giteaRpcContract>();
   const [options, setOptions] = useState<Loadable<RepoOptions>>(loading);
@@ -3261,162 +3245,313 @@ function useThreadItems(threadId: string): Loadable<ItemRef[]> {
   return linked;
 }
 
-function LinkedItemSwitcher({ items, selected, onSelect }: {
-  items: ItemRef[];
-  selected: ItemRef;
-  onSelect: (key: string) => void;
+type ItemStatusView = PluginRpcResult<(typeof giteaRpcContract)["itemStatus"]>;
+type Tone = "green" | "red" | "amber" | "purple" | "muted";
+type ChipSpec = {
+  label: string;
+  tone: Tone;
+  icon: string;
+  title: string;
+  href?: string;
+};
+type ChipTable<U extends { kind: string }> = {
+  [K in U["kind"]]: (status: Extract<U, { kind: K }>) => ChipSpec;
+};
+
+const itemStatusPollMs = 30_000;
+const toneClasses: Record<Tone, string> = {
+  green: "bg-green-500/15 text-green-700 dark:text-green-400",
+  red: "bg-red-500/15 text-red-600 dark:text-red-400",
+  amber: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400",
+  purple: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
+  muted: "bg-muted text-muted-foreground",
+};
+
+function plural(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+const reviewChips: ChipTable<ReviewStatus> = {
+  "changes-requested": ({ reviewers }) => ({
+    label: "Changes requested",
+    tone: "red",
+    icon: "X",
+    title: `Changes requested by ${reviewers.join(", ")}`,
+  }),
+  approved: ({ reviewers }) => ({
+    label: "Approved",
+    tone: "green",
+    icon: "Check",
+    title: `Approved by ${reviewers.join(", ")}`,
+  }),
+  awaiting: ({ reviewers }) => ({
+    label: "Awaiting",
+    tone: "amber",
+    icon: "Clock",
+    title: `Review requested from ${reviewers.join(", ")}`,
+  }),
+  none: () => ({ label: "No review", tone: "muted", icon: "Minus", title: "No review" }),
+};
+
+const ciChips: ChipTable<CiStatus> = {
+  passing: ({ total }) => ({
+    label: "Passing",
+    tone: "green",
+    icon: "Check",
+    title: `${plural(total, "check")} passed`,
+  }),
+  failing: ({ failed }) => ({
+    label: `${failed.length} failing`,
+    tone: "red",
+    icon: "X",
+    title: failed.map((check) => check.name).join("\n"),
+    href: failed[0]?.url,
+  }),
+  running: ({ total, pending, url }) => ({
+    label: "Running",
+    tone: "amber",
+    icon: "Clock",
+    title: `${pending} of ${plural(total, "check")} running`,
+    href: url,
+  }),
+  none: () => ({ label: "No CI", tone: "muted", icon: "Minus", title: "No CI checks on the latest commit" }),
+  unavailable: () => ({
+    label: "Unknown",
+    tone: "muted",
+    icon: "Minus",
+    title: "Couldn't read CI status",
+  }),
+};
+
+// The tables are exhaustive over `kind` by their mapped type, so the entry always accepts its own status.
+function chipFor<U extends { kind: string }>(table: ChipTable<U>, status: U): ChipSpec {
+  const make = table[status.kind as U["kind"]] as (status: U) => ChipSpec;
+  return make(status);
+}
+
+function StatusChip({ spec }: { spec: ChipSpec }) {
+  const chip = (
+    <span
+      title={spec.title}
+      className={cn(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium",
+        toneClasses[spec.tone],
+      )}
+    >
+      <Icon name={spec.icon} className="size-3" />
+      {spec.label}
+    </span>
+  );
+  return spec.href ? (
+    <UrlLink href={spec.href} className="hover:opacity-80">
+      {chip}
+    </UrlLink>
+  ) : (
+    chip
+  );
+}
+
+const lifecycleChips: Record<"merged" | "closed", ChipSpec> = {
+  merged: { label: "Merged", tone: "purple", icon: "GitMerge", title: "Merged" },
+  closed: { label: "Closed", tone: "muted", icon: "X", title: "Closed without merging" },
+};
+
+function useItemStatus(target: ItemRef, refreshEpoch: number): Loadable<ItemStatusView> {
+  const rpc = useRpc<typeof giteaRpcContract>();
+  const { kind, repo, number } = target;
+  const [view, setView] = useState<Loadable<ItemStatusView>>(loading);
+  const latest = useRef(0);
+  const load = useCallback(
+    async (refresh: boolean) => {
+      const request = ++latest.current;
+      try {
+        const value = await rpc.call("itemStatus", { kind, repo, number, refresh });
+        if (request === latest.current) setView({ state: "ready", value });
+      } catch (error) {
+        if (request === latest.current)
+          setView((previous) =>
+            previous.state === "ready"
+              ? previous
+              : { state: "error", message: errorText(error, "Could not load item") },
+          );
+      }
+    },
+    [rpc, kind, repo, number],
+  );
+  useEffect(() => {
+    void load(false);
+    const timer = setInterval(() => void load(false), itemStatusPollMs);
+    return () => {
+      clearInterval(timer);
+      latest.current += 1;
+    };
+  }, [load]);
+  const refreshed = useRef(refreshEpoch);
+  useEffect(() => {
+    if (refreshed.current === refreshEpoch) return;
+    refreshed.current = refreshEpoch;
+    void load(true);
+  }, [refreshEpoch, load]);
+  const onChange = useCallback(
+    (payload: unknown) => {
+      const change = parseDisplayChange(payload);
+      if (!change || change.scope === "lists") return;
+      if (change.scope === "item" && change.tag !== itemTag(target)) return;
+      if (change.scope === "all" || !change.files) void load(false);
+    },
+    [load, target],
+  );
+  useRealtime("display-changed", onChange);
+  return view;
+}
+
+function StatusRowFrame({
+  item,
+  draft,
+  warning,
+  link,
+  title,
+  dim,
+  children,
+}: {
+  item: ItemRef;
+  draft: boolean;
+  warning: string | null;
+  link: string | null;
+  title: string | null;
+  dim: boolean;
+  children: ReactNode;
 }) {
-  if (items.length < 2) return null;
+  const name = `${item.repo.split("/")[1] ?? item.repo}#${item.number}`;
+  const identity = (
+    <>
+      <span className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+        <span title={item.repo}>{name}</span>
+        {draft && <span className="font-sans">Draft</span>}
+        {warning !== null && (
+          <span title={warning}>
+            <Icon name="AlertTriangle" className="size-3" aria-label="Showing older data" />
+          </span>
+        )}
+      </span>
+      {title !== null && <span className="block truncate text-sm">{title}</span>}
+    </>
+  );
   return (
-    <div className="shrink-0 border-b px-4 py-2">
-      <Select value={agentLinkKey(selected)} onValueChange={onSelect}>
-        <SelectTrigger aria-label="Linked Gitea item" className="h-8 text-xs">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {items.map((item) => (
-            <SelectItem key={agentLinkKey(item)} value={agentLinkKey(item)}>
-              {item.repo}#{item.number} · {item.kind}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
+    <tr className={cn("border-b last:border-b-0", dim && "opacity-60")}>
+      <td className="w-full max-w-0 py-2 pl-3 pr-2">
+        {link ? (
+          <UrlLink href={link} className="block min-w-0 hover:underline">
+            {identity}
+          </UrlLink>
+        ) : (
+          identity
+        )}
+      </td>
+      {children}
+    </tr>
+  );
+}
+
+function ItemStatusRow({ item, refreshEpoch }: { item: ItemRef; refreshEpoch: number }) {
+  const view = useItemStatus(item, refreshEpoch);
+  if (view.state === "loading")
+    return (
+      <StatusRowFrame item={item} draft={false} warning={null} link={null} title={null} dim={false}>
+        <td className="px-2 py-2"><Skeleton className="h-5 w-24" /></td>
+        <td className="px-2 py-2 pr-3"><Skeleton className="h-5 w-20" /></td>
+      </StatusRowFrame>
+    );
+  if (view.state === "error")
+    return (
+      <StatusRowFrame item={item} draft={false} warning={null} link={null} title={null} dim={false}>
+        <td colSpan={2} className="px-2 py-2 pr-3 text-xs text-muted-foreground" title={view.message}>
+          Couldn't load
+        </td>
+      </StatusRowFrame>
+    );
+  const { status, freshness } = view.value;
+  const frame = {
+    item,
+    warning: freshness.state === "stale-error" ? freshness.error : null,
+    link: status.url || null,
+    title: status.title,
+  };
+  const spanning = (spec: ChipSpec) => (
+    <td colSpan={2} className="px-2 py-2 pr-3"><StatusChip spec={spec} /></td>
+  );
+  if (status.kind === "issue")
+    return (
+      <StatusRowFrame {...frame} draft={false} dim={false}>
+        {spanning({
+          label: `Issue · ${status.state}`,
+          tone: "muted",
+          icon: status.state === "open" ? "Circle" : "Check",
+          title: `Issue · ${status.state}`,
+        })}
+      </StatusRowFrame>
+    );
+  const { lifecycle } = status;
+  if (lifecycle.state !== "open")
+    return (
+      <StatusRowFrame {...frame} draft={false} dim>
+        {spanning(lifecycleChips[lifecycle.state])}
+      </StatusRowFrame>
+    );
+  return (
+    <StatusRowFrame {...frame} draft={lifecycle.draft} dim={false}>
+      <td className="px-2 py-2"><StatusChip spec={chipFor(reviewChips, lifecycle.review)} /></td>
+      <td className="px-2 py-2 pr-3"><StatusChip spec={chipFor(ciChips, lifecycle.ci)} /></td>
+    </StatusRowFrame>
   );
 }
 
 function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
   const linked = useThreadItems(threadId);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [section, setSection] = useState<DetailSection>("conversation");
-  useEffect(() => {
-    setSelectedKey(null);
-    setSection("conversation");
-  }, [threadId]);
-  const viewer = useViewerLogin();
-  const items = linked.state === "ready" ? linked.value : [];
-  const item = items.find((entry) => agentLinkKey(entry) === selectedKey) ?? items[0] ?? null;
-  const select = (key: string) => {
-    setSelectedKey(key);
-    setSection("conversation");
-  };
-  const display = useItemDisplay(
-    item,
-    item?.kind === "pr" && section === "files",
-  );
-  const shown = display.conversation;
-  const switcher = item && (
-    <LinkedItemSwitcher items={items} selected={item} onSelect={select} />
-  );
-  const notice = (message: string) => (
-    <div className="flex h-full min-h-0 flex-col text-sm">
-      {switcher}
-      <div className="p-4 text-muted-foreground">{message}</div>
-    </div>
-  );
-  if (linked.state === "error") return notice(linked.message);
-  if (linked.state === "loading") return notice("Loading Gitea item…");
-  if (!item) return notice("This BB thread is not linked to a Gitea issue or pull request.");
-  if (shown.state === "error") return notice(shown.message);
-  if (shown.state === "loading") return notice("Loading Gitea item…");
-  const detail = shown.value.conversation;
-  const header = (
-    <header className="shrink-0 space-y-2 border-b p-4">
-      <div className="font-semibold">{detail.title}</div>
-      <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-        <span className="flex-1">
-          {detail.repo}#{detail.number} · {detail.kind} · {detail.state}
-        </span>
-        <FreshnessNote
-          freshness={shown.value.freshness}
-          onRefresh={() => void display.refresh()}
-        />
-      </div>
-      {detail.kind === "pr" && (
-        <DetailTabsList
-          comments={detail.comments.length}
-          files={detail.changedFiles ?? filesCount(display.files)}
-        />
-      )}
-    </header>
-  );
-  const conversation = (
-    <>
-      <article className="border-b p-4">
-        <div className="mb-2 text-xs text-muted-foreground">
-          {detail.author}
-        </div>
-        {detail.body ? (
-          <Markdown content={detail.body} className="min-w-0" />
-        ) : (
-          <div className="text-muted-foreground">No description</div>
-        )}
-      </article>
-      <section className="p-4">
-        <h3 className="mb-2 font-medium">Conversation</h3>
-        {detail.commentsTruncated && (
-          <div className="mb-2 text-xs text-muted-foreground">
-            Conversation history reached the 500-comment cap and may be
-            incomplete.
-          </div>
-        )}
-        {detail.comments.map((comment) => (
-          <CommentCard
-            key={comment.id}
-            item={detail}
-            comment={comment}
-            mine={sameLogin(comment.author, viewer)}
-            onChanged={display.reload}
-            className="mb-3 rounded border p-3"
-          />
-        ))}
-        {detail.kind === "pr" && (
-          <LineCommentList comments={detail.reviewComments} />
-        )}
-        <CommentComposer
-          key={itemKey(detail)}
-          item={detail}
-          onPosted={display.reload}
-        />
-      </section>
-    </>
-  );
-  if (detail.kind !== "pr")
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
+  if (linked.state === "error")
+    return <div className="p-4 text-sm text-muted-foreground">{linked.message}</div>;
+  if (linked.state === "loading")
+    return <div className="p-4 text-sm text-muted-foreground">Loading Gitea items…</div>;
+  if (linked.value.length === 0)
     return (
-      <div className="flex h-full min-h-0 flex-col text-sm">
-        {switcher}
-        {header}
-        <div className="min-h-0 flex-1 overflow-y-auto">{conversation}</div>
+      <div className="space-y-1 p-4 text-sm text-muted-foreground">
+        <p>This BB thread is not linked to a Gitea issue or pull request.</p>
+        <p>
+          Link one with <code>bb gitea link pr &lt;owner/repo&gt; &lt;number&gt;</code>.
+        </p>
       </div>
     );
   return (
-    <Tabs
-      value={section}
-      onValueChange={(value) => setSection(value as DetailSection)}
-      className="flex h-full min-h-0 flex-col text-sm"
-    >
-      {switcher}
-      {header}
-      <TabsContent
-        value="conversation"
-        className="mt-0 min-h-0 flex-1 overflow-y-auto"
-      >
-        {conversation}
-      </TabsContent>
-      <TabsContent value="files" className="mt-0 min-h-0 flex-1 p-3">
-        <PullFilesPane
-          files={display.files}
-          url={filesUrl(detail)}
-          moved={display.filesMoved}
-          review={{
-            repo: detail.repo,
-            number: detail.number,
-            comments: detail.reviewComments,
-            onPosted: display.reload,
-          }}
-        />
-      </TabsContent>
-    </Tabs>
+    <div className="flex h-full min-h-0 flex-col text-sm">
+      <div className="flex shrink-0 justify-end px-2 pt-2">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-7"
+          aria-label="Refresh"
+          onClick={() => setRefreshEpoch((epoch) => epoch + 1)}
+        >
+          <Icon name="ArrowReloadHorizontal" className="size-3.5" />
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="border-b text-left text-xs font-medium text-muted-foreground">
+              <th className="py-1.5 pl-3 pr-2 font-medium">Pull request</th>
+              <th className="px-2 py-1.5 font-medium">Review</th>
+              <th className="px-2 py-1.5 pr-3 font-medium">CI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {linked.value.map((item) => (
+              <ItemStatusRow key={agentLinkKey(item)} item={item} refreshEpoch={refreshEpoch} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -3430,7 +3565,7 @@ export default definePluginApp((app) => {
   });
   app.slots.threadPanelAction({
     id: "item",
-    title: "Gitea issue or PR",
+    title: "Gitea",
     icon: "gitea/teacup",
     component: GiteaThreadPanel,
   });
