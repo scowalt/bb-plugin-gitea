@@ -61,7 +61,7 @@ export function useThreadItems(threadId: string) {
 }
 
 type Tone = "green" | "red" | "amber" | "purple" | "muted";
-type ChipSpec = {
+export type ChipSpec = {
   label: string;
   tone: Tone;
   icon: string;
@@ -72,7 +72,7 @@ type ChipTable<U extends { kind: string }> = {
   [K in U["kind"]]: (status: Extract<U, { kind: K }>) => ChipSpec;
 };
 
-const toneClasses: Record<Tone, string> = {
+export const toneClasses: Record<Tone, string> = {
   green: "bg-green-500/15 text-green-700 dark:text-green-400",
   red: "bg-red-500/15 text-red-600 dark:text-red-400",
   amber: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400",
@@ -106,7 +106,7 @@ const reviewChips: ChipTable<ReviewStatus> = {
   none: () => ({ label: "No review", tone: "muted", icon: "Minus", title: "No review" }),
 };
 
-const ciChips: ChipTable<CiStatus> = {
+export const ciChips: ChipTable<CiStatus> = {
   passing: ({ total }) => ({
     label: "Passing",
     tone: "green",
@@ -137,12 +137,12 @@ const ciChips: ChipTable<CiStatus> = {
 };
 
 // The tables are exhaustive over `kind` by their mapped type, so the entry always accepts its own status.
-function chipFor<U extends { kind: string }>(table: ChipTable<U>, status: U): ChipSpec {
+export function chipFor<U extends { kind: string }>(table: ChipTable<U>, status: U): ChipSpec {
   const make = table[status.kind as U["kind"]] as (status: U) => ChipSpec;
   return make(status);
 }
 
-const lifecycleChips: Record<"merged" | "closed", ChipSpec> = {
+export const lifecycleChips: Record<"merged" | "closed", ChipSpec> = {
   merged: { label: "Merged", tone: "purple", icon: "GitMerge", title: "Merged" },
   closed: { label: "Closed", tone: "muted", icon: "X", title: "Closed without merging" },
 };
@@ -152,7 +152,7 @@ const issueChips: Record<"open" | "closed", ChipSpec> = {
   closed: { label: "Issue · Closed", tone: "muted", icon: "Check", title: "Closed issue" },
 };
 
-function StatusChip({ spec }: { spec: ChipSpec }) {
+export function StatusChip({ spec }: { spec: ChipSpec }) {
   const chip = (
     <span
       title={spec.title}

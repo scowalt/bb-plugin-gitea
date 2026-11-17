@@ -25,7 +25,13 @@ import type { PluginRpcClient, PluginRpcResult } from "@get-bb/plugin-sdk/app";
 import type { giteaRpcContract } from "./server.js";
 import { GITEA_BRANCH_ENVIRONMENT_PROVIDER_ID } from "./branch-inputs.js";
 import { GiteaThreadPanel } from "./thread-items-panel.js";
-import { giteaTab, pullCountAction, usePullCounts } from "./thread-pulls.js";
+import {
+  giteaTab,
+  PullsSegment,
+  pullCountAction,
+  usePullCounts,
+  usePullsSegmentVisible,
+} from "./thread-pulls.js";
 import { issueReferences } from "./issue-references.js";
 import { autoFixerExecutionSchema } from "./execution.js";
 import { GiteaBranchInputsControl } from "./environment-picker.js";
@@ -3245,6 +3251,14 @@ export default definePluginApp((app) => {
     placement: "header",
     useData: usePullCounts,
     item: pullCountAction,
+  });
+  app.slots.experimental_threadContextSegment({
+    id: "pulls",
+    title: "Gitea pull requests",
+    group: "2_pullRequest",
+    order: 20,
+    summary: PullsSegment,
+    useVisible: usePullsSegmentVisible,
   });
   app.slots.experimental_appOverlay({
     id: "display-scope",

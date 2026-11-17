@@ -144,3 +144,69 @@ it("updates the count when the server marks the keyed read stale", async () => {
   await act(() => slot.behavior.experimental_invalidateRpc(["thread-pulls"]));
   expect(await screen.findByText("2 PRs · 1 failing")).toBeTruthy();
 });
+
+const segment = app.threadContextSegments.find((registration) => registration.id === "pulls")!;
+
+/** Draws the segment the way bb's context row does: asks useVisible, then mounts the summary. */
+function ContextRow({ threadId }: { threadId: string }) {
+  const input = { threadId, projectId: "proj_a", environment: null };
+  const visible = segment.useVisible?.(input) ?? true;
+  const Summary = segment.summary;
+  return (
+    <div data-testid="context-row" data-visible={visible}>
+      {visible && (
+        <Summary {...input} segments={[{ key: "gitea/pulls", pluginId: "gitea" }]} isExpanded={false} onToggle={() => {}} />
+      )}
+    </div>
+  );
+}
+
+const five = row(
+  pull(5, merged),
+  pull(4, failing),
+  pull(3, closed),
+  pull(2, null),
+  pull(1, passing, { repo: "acme/camp" }),
+);
+
+it("lists the thread's pull requests above the composer, open ones first, as #n in their CI colours, and collapses past three", async () => {
+  const { options } = keyed({ thr_a: five });
+  renderSlot({ component: ContextRow }, { threadId: "thr_a" }, options);
+  const failingChip = await screen.findByRole("button", { name: "acme/ops#4 · Change 4 · 1 failing" });
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["#4", "#2", "#1", "+2"]);
+  expect(failingChip.className).toContain("bg-red-500/15");
+  expect(screen.getByRole("button", { name: "acme/ops#2 · Checking" }).className).toContain("bg-muted");
+  expect(screen.getByRole("button", { name: "acme/camp#1 · Change 1 · Passing" }).className).toContain("bg-green-500/15");
+  expect(screen.getByText("+2").title).toBe("2 more Gitea pull requests");
+});
+
+it("shows merged and closed pull requests in their own colours", async () => {
+  const { options } = keyed({ thr_a: row(pull(2, merged), pull(1, closed)) });
+  renderSlot({ component: ContextRow }, { threadId: "thr_a" }, options);
+  expect((await screen.findByRole("button", { name: "acme/ops#2 · Change 2 · Merged" })).className).toContain("bg-purple-500/15");
+  expect(screen.getByRole("button", { name: "acme/ops#1 · Change 1 · Closed" }).className).toContain("bg-muted");
+});
+
+it("opens the Gitea tab from a pull request or the +N in the context row", async () => {
+  const { options } = keyed({ thr_a: five });
+  const slot = renderSlot({ component: ContextRow }, { threadId: "thr_a" }, options);
+  fireEvent.click(await screen.findByText("#4"));
+  fireEvent.click(screen.getByText("+2"));
+  expect(slot.inspection.experimental_panelCalls).toEqual([giteaTabOpen, giteaTabOpen]);
+});
+
+it("hides the context row segment while the thread has no pull request", async () => {
+  const { requests, options } = keyed({ thr_a: row() });
+  renderSlot({ component: ContextRow }, { threadId: "thr_a" }, options);
+  await act(async () => {});
+  expect(requests).toEqual([["thr_a"]]);
+  expect(screen.getByTestId("context-row").dataset.visible).toBe("false");
+});
+
+it("leaves the context row to the card while the pane shows the thread context card", async () => {
+  const { requests, options } = keyed({ thr_a: five });
+  renderSlot({ component: ContextRow }, { threadId: "thr_a" }, { ...options, threadContextKind: "card" });
+  await act(async () => {});
+  expect(screen.getByTestId("context-row").dataset.visible).toBe("false");
+  expect(requests).toEqual([]);
+});
