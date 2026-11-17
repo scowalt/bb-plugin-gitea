@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin, { giteaRpcContract } from "./server";
@@ -369,6 +371,51 @@ it("shows a pull request's state once the refresher reads it, and drops one a co
     ci: { kind: "passing", total: 1 },
   });
   expect(calls.every((call) => call.method === "GET")).toBe(true);
+});
+
+it("links the pull requests of creates whose output was cut down to pulls/<n>, from Gitea's search", { timeout: 60_000 }, async () => {
+  const fixtures = join(import.meta.dirname, "test-fixtures/created-pr-filtered-output");
+  const read = <T,>(name: string): T => JSON.parse(readFileSync(join(fixtures, name), "utf8"));
+  type Found = { number: number; created_at: string; updated_at: string; repository: { full_name: string } };
+  const calls = read<{ thread: string; startedAt: string; command: string; output: string }[]>("calls.json");
+  const found = [...read<Found[]>("search-2026-11-17T02-47.json"), ...read<Found[]>("search-2026-11-15T22-41.json")]
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const events: Record<string, Row[]> = {};
+  for (const call of calls) {
+    const rows = (events[call.thread] ??= []);
+    const [started, completed] = shell(rows.length + 1, Date.parse(call.startedAt) + 15_000, call.command, call.output);
+    rows.push({ ...started!, createdAt: Date.parse(call.startedAt) }, completed!);
+  }
+  const { host, calls: tea } = await startItems({
+    events,
+    api: ({ endpoint }) => {
+      const [path, query] = endpoint.split("?");
+      if (path === "/api/v1/repos/issues/search") {
+        const params = new URLSearchParams(query);
+        const page = Number(params.get("page"));
+        return { json: found.filter((pull) => Date.parse(pull.updated_at) >= Date.parse(params.get("since")!)).slice((page - 1) * 50, page * 50) };
+      }
+      const one = path!.match(/^\/api\/v1\/repos\/(.+)\/pulls\/(\d+)$/);
+      const match = one && found.find((pull) => pull.repository.full_name === one[1] && pull.number === Number(one[2]));
+      if (match) return { json: pull(match.number, { html_url: url(match.number, match.repository.full_name), created_at: match.created_at }) };
+      return undefined;
+    },
+  });
+  runSweeps(host);
+  for (const thread of Object.keys(events)) await idle(host, thread);
+  await eventually(async () => {
+    // Three searches and four open pull requests take more than one budget window.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shown(await view(host, calls[0]!.thread))).toEqual([
+      { ref: "wonderlydotcom/internal-tool-work-compliance#254", state: "open", links: ["opened"] },
+      { ref: "wonderlydotcom/internal-tool-work-compliance#253", state: "open", links: ["opened"] },
+      { ref: "wonderlydotcom/internal-tool-work-compliance#252", state: "open", links: ["opened"] },
+    ]);
+    expect(shown(await view(host, calls[2]!.thread))).toEqual([
+      { ref: "wonderlydotcom/internal-tool-camp#4105", state: "open", links: ["opened"] },
+    ]);
+  });
+  expect(tea.filter((call) => call.endpoint.startsWith("/api/v1/repos/issues/search?"))).toHaveLength(3);
 });
 
 it("reads a pull request again after Refresh or a change the plugin made, and never from a view alone", { timeout: 60_000 }, async () => {

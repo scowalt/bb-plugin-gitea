@@ -1692,6 +1692,7 @@ export default async function plugin(bb: BbPluginApi) {
     server: () => cleanBaseUrl(config.baseUrl).href,
     account: displayAccount,
     get: (repo, path, signal) => api(repoPath(repo, path), { signal }),
+    search: (query, signal) => api(`repos/issues/search?${query}`, { signal }),
     resolveUrl: (value) => safeLink(cleanBaseUrl(config.baseUrl), value),
     async kind(repo, number) {
       const issue = record(await api(repoPath(repo, `issues/${number}`)));

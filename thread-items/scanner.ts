@@ -1,8 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { repoKey } from "../auto-fixer.js";
-import { detect, type DetectedLink } from "./detect.js";
-import type { NewLink, openStore } from "./store.js";
+import { detect, type DetectedCreate, type DetectedLink } from "./detect.js";
+import type { NewCreate, NewLink, openStore } from "./store.js";
 
 /** How many full event pages a reader waits for before it returns with `scanning: true`. */
 const SCAN_PAGES_PER_READ = 3;
@@ -43,9 +43,14 @@ function detectedLink(threadId: string, link: DetectedLink): NewLink {
   };
 }
 
+function detectedCreate(threadId: string, create: DetectedCreate): NewCreate {
+  return { threadId, numbers: create.numbers, linkedAt: create.at, window: create.window };
+}
+
 /**
  * Reads threads' shell command events from each thread's cursor and records
- * the pull requests they opened or pushed to. A thread has at most one run in
+ * the pull requests they opened or pushed to, and the creates whose pull
+ * requests the refresher has to look up. A thread has at most one run in
  * flight, and each run reads to the end of the thread's history.
  */
 export function createScanner({
@@ -58,7 +63,7 @@ export function createScanner({
   bb: Pick<BbPluginApi, "sdk" | "log">;
   store: ReturnType<typeof openStore>;
   server: () => string;
-  added: (links: readonly NewLink[]) => void;
+  added: (found: { links: readonly NewLink[]; creates: number }) => void;
   publish: () => void;
 }) {
   const runs = new Map<string, Run>();
@@ -79,8 +84,11 @@ export function createScanner({
         );
         const last = rows.at(-1);
         if (last) {
-          const links = detect(rows, at).links.map((link) => detectedLink(threadId, link));
-          added(store.addScannedPage(at, threadId, links, last.seq));
+          const found = detect(rows, at);
+          added(store.addScannedPage(at, threadId, {
+            links: found.links.map((link) => detectedLink(threadId, link)),
+            creates: found.creates.map((create) => detectedCreate(threadId, create)),
+          }, last.seq));
         }
         if (rows.length < pageSize) {
           finishedAt.set(threadId, Date.now());

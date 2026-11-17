@@ -57,6 +57,17 @@ const migrations = [
     WHERE snapshot IS NOT NULL AND json_extract(snapshot, '$.kind') IS NULL`,
   `INSERT OR IGNORE INTO item_states (server, repo_key, number)
     SELECT DISTINCT server, repo_key, number FROM thread_items`,
+  `CREATE TABLE unresolved_creates (
+    server TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    created_from INTEGER NOT NULL,
+    created_to INTEGER NOT NULL,
+    numbers TEXT NOT NULL,
+    linked_at INTEGER NOT NULL,
+    due_at INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (server, thread_id, created_from, created_to)
+  )`,
 ];
 
 export type ItemId = { repoKey: string; number: number };
@@ -70,6 +81,17 @@ export type NewLink = ItemId & {
   linkedAt: number;
   window: CreationWindow | null;
 };
+
+/** A create command whose output named its pull requests only by number; see `DetectedCreate`. */
+export type NewCreate = {
+  threadId: string;
+  numbers: number[];
+  linkedAt: number;
+  window: CreationWindow;
+};
+
+/** A create waiting for the refresher to find its pull requests. `failures` counts consecutive failed searches. */
+export type UnresolvedCreate = NewCreate & { failures: number };
 
 export type ItemState = {
   snapshot: ItemSnapshot | null;
@@ -106,6 +128,14 @@ const stateRowSchema = z.object({
 const joinedRowSchema = linkRowSchema.extend({ state_present: z.string().nullable() });
 const dueRowSchema = stateRowSchema.extend({ repo_key: z.string(), number: z.number(), kind: z.enum(["issue", "pr"]) });
 const sourceRowSchema = z.object({ source: z.enum(linkSources) });
+const createRowSchema = z.object({
+  thread_id: z.string(),
+  created_from: z.number(),
+  created_to: z.number(),
+  numbers: z.string().transform((raw) => z.array(z.number()).parse(JSON.parse(raw))),
+  linked_at: z.number(),
+  failures: z.number(),
+});
 
 function parseSnapshot(raw: string | null): ItemSnapshot | null {
   if (raw === null) return null;
@@ -230,7 +260,21 @@ export function openStore(
     deleteCursor: db.prepare(
       `DELETE FROM scan_cursors WHERE server = ? AND thread_id = ?`,
     ),
+    insertCreate: db.prepare(`
+      INSERT OR IGNORE INTO unresolved_creates (server, thread_id, created_from, created_to, numbers, linked_at)
+      VALUES (@server, @threadId, @from, @to, @numbers, @linkedAt)`),
+    dueCreate: db.prepare(`
+      SELECT * FROM unresolved_creates WHERE server = ? AND due_at <= ?
+      ORDER BY due_at, rowid LIMIT 1`),
+    deleteCreate: db.prepare(`
+      DELETE FROM unresolved_creates
+      WHERE server = @server AND thread_id = @threadId AND created_from = @from AND created_to = @to`),
+    saveCreateFailure: db.prepare(`
+      UPDATE unresolved_creates SET failures = @failures, due_at = @dueAt
+      WHERE server = @server AND thread_id = @threadId AND created_from = @from AND created_to = @to`),
   };
+  const createKeys = (server: string, create: NewCreate) =>
+    ({ server, threadId: create.threadId, from: create.window.from, to: create.window.to });
 
   function readState(server: string, item: ItemId): ItemState | null {
     const row = sql.selectState.get(server, item.repoKey, item.number);
@@ -286,13 +330,55 @@ export function openStore(
         for (const [server, links] of byServer) addLinks(server, links);
       })(),
 
-    /** Inserts the links one event page found and moves the thread's cursor past that page, atomically. */
-    addScannedPage: (server: string, threadId: string, links: readonly NewLink[], lastSeq: number) =>
+    /**
+     * Inserts the links and unresolved creates one event page found and moves
+     * the thread's cursor past that page, atomically. Returns the links that
+     * changed and how many creates were new.
+     */
+    addScannedPage: (
+      server: string,
+      threadId: string,
+      found: { links: readonly NewLink[]; creates: readonly NewCreate[] },
+      lastSeq: number,
+    ) =>
+      db.transaction(() => {
+        const links = addLinks(server, found.links);
+        let creates = 0;
+        for (const create of found.creates)
+          creates += sql.insertCreate.run({
+            ...createKeys(server, create),
+            numbers: JSON.stringify(create.numbers),
+            linkedAt: create.linkedAt,
+          }).changes;
+        sql.writeCursor.run(server, threadId, lastSeq);
+        return { links, creates };
+      })(),
+
+    /** The unresolved create whose search is due soonest, or null when none is due. */
+    dueCreate(server: string, now: number): UnresolvedCreate | null {
+      const raw = sql.dueCreate.get(server, now);
+      if (raw === undefined) return null;
+      const row = createRowSchema.parse(raw);
+      return {
+        threadId: row.thread_id,
+        numbers: row.numbers,
+        linkedAt: row.linked_at,
+        window: { from: row.created_from, to: row.created_to },
+        failures: row.failures,
+      };
+    },
+
+    /** Inserts the links a create's search found and forgets the create, atomically. Returns the links that changed. */
+    resolveCreate: (server: string, create: NewCreate, links: readonly NewLink[]) =>
       db.transaction(() => {
         const added = addLinks(server, links);
-        sql.writeCursor.run(server, threadId, lastSeq);
+        sql.deleteCreate.run(createKeys(server, create));
         return added;
       })(),
+
+    saveCreateFailure(server: string, create: NewCreate, failure: { failures: number; dueAt: number }) {
+      sql.saveCreateFailure.run({ ...createKeys(server, create), ...failure });
+    },
 
     /** Deletes a thread's link to an item of `kind`. Returns the deleted link's source, or null when there was none. */
     removeLink(server: string, threadId: string, item: ItemId, kind: ItemKind): LinkSource | null {

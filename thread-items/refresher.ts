@@ -1,11 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
+import { repoKey } from "../auto-fixer.js";
 import { GiteaNotFoundError } from "../gitea-errors.js";
 import { deriveCi, deriveReview, type CiStatus } from "../item-status.js";
 import type { IssueSnapshot, ItemSnapshot, PullSnapshot } from "./contract.js";
-import { isHot, nextDueAt, readIssue, readPull } from "./pull-state.js";
+import type { CreationWindow } from "./detect.js";
+import { isHot, nextDueAt, readIssue, readPull, retryAt } from "./pull-state.js";
 import type { GiteaReads } from "./service.js";
-import type { DueItem, ItemId, openStore } from "./store.js";
+import type { DueItem, ItemId, NewLink, openStore, UnresolvedCreate } from "./store.js";
 
 const sweepIntervalMs = 30_000;
 /** The refresher starts at most `calls` tea processes in any `windowMs`. */
@@ -15,6 +18,8 @@ const callsPerRead = 3;
 const pageSize = 50;
 const maxReviewPages = 10;
 const maxStatusPages = 4;
+/** How many pages of search results a create's lookup reads before it gives up. */
+export const maxSearchPages = 10;
 
 const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -84,6 +89,37 @@ async function readIssueSnapshot(get: Get, repo: string, number: number, signal?
   return issue;
 }
 
+const searchRowsSchema = z.array(
+  z.object({ number: z.number(), created_at: z.string(), repository: z.object({ full_name: z.string() }) }),
+);
+
+/**
+ * The pull requests the login created inside `window`, oldest first. The
+ * search returns them newest first and `since` filters on the last update, so
+ * it pages back until a pull request predates the window. `complete` is false
+ * when `maxSearchPages` ran out first.
+ */
+async function searchCreated(
+  search: GiteaReads["search"],
+  window: CreationWindow,
+  signal?: AbortSignal,
+): Promise<{ pulls: { repo: string; number: number }[]; complete: boolean }> {
+  const pulls: { repo: string; number: number }[] = [];
+  const since = encodeURIComponent(new Date(window.from).toISOString());
+  for (let page = 1; page <= maxSearchPages; page += 1) {
+    const rows = searchRowsSchema.parse(
+      await search(`type=pulls&created=true&state=all&since=${since}&${pageQuery(page)}`, signal),
+    );
+    for (const row of rows) {
+      const createdAt = Date.parse(row.created_at);
+      if (createdAt < window.from) return { pulls: pulls.reverse(), complete: true };
+      if (createdAt <= window.to) pulls.push({ repo: row.repository.full_name, number: row.number });
+    }
+    if (rows.length < pageSize) return { pulls: pulls.reverse(), complete: true };
+  }
+  return { pulls: pulls.reverse(), complete: false };
+}
+
 /** Resolves a waiting loop early. A poke while nobody waits makes the next wait return at once. */
 function createWakeup() {
   let pending = false;
@@ -143,8 +179,10 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Keeps the state of linked issues and pull requests fresh: reads due rows one at a
- * time, within `teaBudget`, and publishes once per sweep that changed a view.
+ * Keeps the state of linked issues and pull requests fresh: finds the pull
+ * requests of creates whose output named them only by number, reads due rows
+ * one at a time, all within `teaBudget`, and publishes once per sweep that
+ * changed a view.
  */
 export function createRefresher({
   store,
@@ -159,16 +197,19 @@ export function createRefresher({
 }) {
   const wakeup = createWakeup();
   const budget = createBudget(teaBudget);
-  // Every read waits for room in the budget, so a pull request with more
+  // Every call waits for room in the budget, so a pull request with more
   // pages than `callsPerRead` delays the sweep instead of overspending.
+  async function budgeted<T>(call: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await delay(budget.waitFor(1, Date.now()), signal);
+    if (signal?.aborted) throw signal.reason;
+    budget.spend(Date.now());
+    return call();
+  }
   const counted = {
     resolveUrl: gitea.resolveUrl,
-    async get(repo: string, path: string, signal?: AbortSignal) {
-      await delay(budget.waitFor(1, Date.now()), signal);
-      if (signal?.aborted) throw signal.reason;
-      budget.spend(Date.now());
-      return gitea.get(repo, path, signal);
-    },
+    get: (repo: string, path: string, signal?: AbortSignal) =>
+      budgeted(() => gitea.get(repo, path, signal), signal),
+    search: (query: string, signal?: AbortSignal) => budgeted(() => gitea.search(query, signal), signal),
   };
 
   /** Stores a successful read. `resets` is the row's count before the read. Returns whether a link changed. */
@@ -215,10 +256,52 @@ export function createRefresher({
     }
   }
 
-  /** Reads due items, soonest first, until none is due or the budget is spent. */
+  /**
+   * Links the pull requests a create named that the login created inside its
+   * window, then forgets the create. A failed search keeps it for a later
+   * sweep. Returns whether a link changed.
+   */
+  async function resolve(server: string, create: UnresolvedCreate, signal?: AbortSignal): Promise<boolean> {
+    const what = `pull request ${create.numbers.map((number) => `#${number}`).join(" or ")} that a command in BB thread ${create.threadId} created at ${new Date(create.linkedAt).toISOString()}`;
+    try {
+      const { pulls, complete } = await searchCreated(counted.search, create.window, signal);
+      const links: NewLink[] = pulls
+        .filter((pull) => create.numbers.includes(pull.number))
+        .map((pull) => ({
+          threadId: create.threadId,
+          repo: pull.repo,
+          repoKey: repoKey(pull.repo),
+          number: pull.number,
+          kind: "pr",
+          source: "opened",
+          account: null,
+          linkedAt: create.linkedAt,
+          window: create.window,
+        }));
+      if (!complete && links.length === 0)
+        log.warn(`Stopped looking for ${what}: the newest ${maxSearchPages * pageSize} pull requests in the search were all created after it.`);
+      return store.resolveCreate(server, create, links).length > 0;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const failures = create.failures + 1;
+      store.saveCreateFailure(server, create, { failures, dueAt: retryAt(failures, Date.now()) });
+      log.warn(`Could not search Gitea for ${what}: ${message(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Looks up due creates, then reads due items, soonest first, until none is
+   * due or the budget is spent.
+   */
   async function sweep(signal?: AbortSignal): Promise<void> {
     const server = gitea.server();
     let changed = false;
+    while (!signal?.aborted && budget.waitFor(1, Date.now()) === 0) {
+      const create = store.dueCreate(server, Date.now());
+      if (!create) break;
+      if (await resolve(server, create, signal)) changed = true;
+    }
     while (!signal?.aborted && budget.waitFor(callsPerRead, Date.now()) === 0) {
       const [item] = store.dueItems(server, Date.now(), 1);
       if (!item) break;

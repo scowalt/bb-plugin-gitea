@@ -84,6 +84,10 @@ function stateOf(snapshot: ItemSnapshot): "open" | "closed" | "merged" {
   return snapshot.kind === "issue" ? snapshot.state : snapshot.lifecycle.state;
 }
 
+/** When to try again after `failures` consecutive failed reads, including the one just made. */
+export const retryAt = (failures: number, now: number) =>
+  now + Math.min(failureBaseMs * 2 ** failures, failureMaxMs);
+
 /**
  * When the refresher should next read an item; null means never.
  * `failures` counts consecutive failed reads, including the one just made.
@@ -92,8 +96,7 @@ export function nextDueAt(
   snapshot: ItemSnapshot | null,
   { hot, failures, now }: { hot: boolean; failures: number; now: number },
 ): number | null {
-  if (failures > 0)
-    return now + Math.min(failureBaseMs * 2 ** failures, failureMaxMs);
+  if (failures > 0) return retryAt(failures, now);
   if (!snapshot) return now;
   switch (stateOf(snapshot)) {
     case "merged":

@@ -15,7 +15,7 @@ import { importLegacy } from "./legacy-import.js";
 import { canChange, readPull, summarize, type PullFacts } from "./pull-state.js";
 import { createRefresher } from "./refresher.js";
 import { createScanner } from "./scanner.js";
-import { openStore, type ItemId, type ItemState, type NewLink, type StoredLink } from "./store.js";
+import { openStore, type ItemId, type ItemState, type StoredLink } from "./store.js";
 
 /** What the thread items service needs from the Gitea side of the plugin. */
 export interface GiteaReads {
@@ -29,6 +29,8 @@ export interface GiteaReads {
   resolveUrl(value: string): string;
   /** Whether `issues/{n}` is an issue or a pull request. */
   kind(repo: string, number: number): Promise<ItemKind>;
+  /** The JSON of `repos/issues/search?<query>`, which searches every repository the login can see. */
+  search(query: string, signal?: AbortSignal): Promise<unknown>;
 }
 
 type RecordInput = {
@@ -79,10 +81,9 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     store,
     server: () => gitea.server(),
     publish,
-    added(links: readonly NewLink[]) {
-      if (links.length === 0) return;
-      publish();
-      if (links.some((link) => link.kind === "pr")) refresher.wake();
+    added({ links, creates }) {
+      if (links.length > 0) publish();
+      if (creates > 0 || links.some((link) => link.kind === "pr")) refresher.wake();
     },
   });
 
