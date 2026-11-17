@@ -14,7 +14,7 @@ Write to Gitea only when the user asks. Read commands accept `--json`. List comm
 - `bb gitea conversation <issue|pr> <owner/repo> <number> [--refresh]` returns what the panel shows, without files. It is cached; `freshness.state` is `fresh`, `refreshing`, or `stale-error`. `--refresh` rereads Gitea. Comment `id`s come from here.
 - `bb gitea files <owner/repo> <number> [--refresh]` returns changed files and diffs for the returned `revision`, with `freshness` and a `stale` flag when the pull request moved during the read. Each file's `diff.kind` is `text` (with `patch`), `empty`, `binary`, `too-large` (over 256 KiB), or `unavailable` with `reason` `missing`, `stale`, `diff-too-large`, or `diff-failed`.
 - `bb gitea options <owner/repo>` lists the repository's labels (name and color) and assignable users.
-- `bb gitea thread <thread-id>` lists every item linked to a BB thread, oldest link first. `--json` returns `{ items: [{ repo, number, kind }] }`.
+- `bb gitea thread <thread-id>` lists every item linked to a BB thread, oldest link first. `--json` returns `{ items: [{ repo, number, kind }] }`. The thread's side panel shows those items as a table of review and CI status, with no description, comments or diff.
 - `bb gitea refresh` rediscovers repositories now. Otherwise discovery is reused for 30 seconds, so a newly added project can take that long to appear.
 
 ## Write
@@ -53,7 +53,7 @@ Turning either on starts an auto-fixer: a hidden BB thread on the host of the re
 
 ## RPCs
 
-Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItems` (`{ items }` for a `threadId`), `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
+Reads: `status`, `refresh`, `listItems`, `listMyIssues`, `listMyPullRequests`, `detail`, `conversation`, `itemStatus` (`{ freshness, status }` for one linked item: an open pull request's CI and review verdict, or just `merged` or `closed`; this is what the thread panel reads), `pullFiles` (pass the conversation `revision`; the current one is returned if the pull request moved), `repoOptions`, `threadItems` (`{ items }` for a `threadId`), `listLinks` (manual thread links keyed by `kind:lowercase-repo#number`, with the current Gitea `account`; badge history persists through archival/deletion).
 
 Writes: `createIssue`, `comment`, `editComment`, `deleteComment`, `reviewComment` (line comments), `updateMetadata`, `setState`, `setDraft`, `review`, `sendAgent`, `linkThread` and `unlinkThread` (`{ repo, number, kind, threadId }`, returning `{ changed, items }`; bb-side only, no Gitea write), `draftAgent` (returns the prompt without starting a thread), `getAgentExecution`, `setAgentExecution` (`execution`, or null for the project default).
 
@@ -63,7 +63,7 @@ Auto-fixers: `setAutomation` (`repo`, `number`, and `fix`, `merge`, or both), `r
 
 - Lists cover at most 50 repositories, ten pages of 50 items per repository, and 200 items total. Errors are reported per repository.
 - Comments and reviews stop at 500, files at 500, checks at 100. A full result is marked as possibly truncated.
-- Panel caches: conversations 15 s fresh and 10 min stale, file sets 5 min fresh and 30 min stale, lists 15 s fresh and 10 min stale. Writes, settings changes, and rejected logins clear them. `show`, list commands, auto-fixers, and merges never use the cache.
+- Panel caches: conversations and item statuses 15 s fresh and 10 min stale, file sets 5 min fresh and 30 min stale, lists 15 s fresh and 10 min stale. Writes, settings changes, and rejected logins clear them. `show`, list commands, auto-fixers, and merges never use the cache.
 - Issue blocker checks use only dependency endpoints, stop at a known open blocker or ten pages, and share the eight-request tea limit. They are cached for 15 seconds without stale reuse and are invalidated by refreshes, writes, and account/settings changes. A filtered empty list may still have unchecked issues beyond the 200-item cap; narrow the repository or query.
 - Checks come from commit statuses.
 
