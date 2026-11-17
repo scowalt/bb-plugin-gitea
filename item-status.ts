@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { repositorySchema } from "./repository.js";
 
 export const ciStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("passing"), total: z.number().int() }),
@@ -25,38 +24,8 @@ export const reviewStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }),
 ]);
 
-const itemBase = {
-  repo: repositorySchema,
-  number: z.number().int().positive(),
-  title: z.string(),
-  url: z.string(),
-};
-
-export const itemStatusSchema = z.discriminatedUnion("kind", [
-  z.object({
-    ...itemBase,
-    kind: z.literal("issue"),
-    state: z.enum(["open", "closed"]),
-  }),
-  z.object({
-    ...itemBase,
-    kind: z.literal("pr"),
-    lifecycle: z.discriminatedUnion("state", [
-      z.object({
-        state: z.literal("open"),
-        draft: z.boolean(),
-        ci: ciStatusSchema,
-        review: reviewStatusSchema,
-      }),
-      z.object({ state: z.literal("merged") }),
-      z.object({ state: z.literal("closed") }),
-    ]),
-  }),
-]);
-
 export type CiStatus = z.infer<typeof ciStatusSchema>;
 export type ReviewStatus = z.infer<typeof reviewStatusSchema>;
-export type ItemStatus = z.infer<typeof itemStatusSchema>;
 
 export type CheckState = "success" | "failure" | "pending" | "neutral";
 

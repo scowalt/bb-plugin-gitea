@@ -12,7 +12,7 @@ import type {
   threadItemsRpcMethods,
 } from "./contract.js";
 import { importLegacy } from "./legacy-import.js";
-import { readPull, summarize, type PullFacts } from "./pull-state.js";
+import { canChange, readPull, summarize, type PullFacts } from "./pull-state.js";
 import { createRefresher } from "./refresher.js";
 import { createScanner } from "./scanner.js";
 import { openStore, type ItemId, type ItemState, type NewLink, type StoredLink } from "./store.js";
@@ -164,7 +164,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     };
   }
 
-  async function view(threadId: string): Promise<ThreadItemsView> {
+  async function view(threadId: string, { refresh = false } = {}): Promise<ThreadItemsView> {
     const tree = await treeOf(threadId);
     const ids = tree.threads.map((thread) => thread.id);
     const scanning = (await Promise.all(ids.map((id) => scanner.forRead(id)))).some(Boolean);
@@ -192,6 +192,8 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
     }
     const pulls = [...byPull.values()].map((rows) => pullOf(server, threadId, titles, rows));
     const items = [...pulls, ...issues];
+    if (refresh)
+      for (const entry of items) if (canChange(entry.state)) store.expire(server, itemOf(entry.repo, entry.number));
     if (store.touch(server, items.map((entry) => itemOf(entry.repo, entry.number)), Date.now()))
       refresher.wake();
     return {
@@ -233,7 +235,7 @@ export async function registerThreadItems(bb: BbPluginApi, gitea: GiteaReads) {
   }
 
   const handlers = {
-    threadItems: ({ threadId }) => view(threadId),
+    threadItems: ({ threadId, refresh }) => view(threadId, { refresh }),
     async linkItem({ threadId, repo, number, kind }): Promise<{ result: "added" | "already" }> {
       const server = gitea.server();
       const item = itemOf(repo, number);

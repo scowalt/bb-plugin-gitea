@@ -364,7 +364,77 @@ it("shows a pull request's state once the refresher reads it, and drops one a co
     expect(items.summary).toMatchObject({ total: 1, open: 1, unreadable: 0, checking: 0 });
   });
   expect(calls.filter((call) => call.endpoint.endsWith("/pulls/8"))).toHaveLength(1);
+  expect((await view(host, "thr-a")).pulls[0]!.state?.lifecycle).toMatchObject({
+    review: { kind: "none" },
+    ci: { kind: "passing", total: 1 },
+  });
   expect(calls.every((call) => call.method === "GET")).toBe(true);
+});
+
+it("reads a pull request again after Refresh or a change the plugin made, and never from a view alone", { timeout: 60_000 }, async () => {
+  const { host, calls, gitea } = await startItems({
+    api: (call) => (call.method === "POST" ? { json: { id: 5 } } : undefined),
+  });
+  gitea.pulls.set(9, pull(9));
+  gitea.statuses.set(sha("a"), "success");
+  await host.harness.behavior.callRpc("linkItem", { repo: "acme/widgets", number: 9, kind: "pr", threadId: "thr-a" });
+  const reads = () => pullReads(calls);
+  expect(reads()).toBe(1);
+  runSweeps(host);
+  await eventually(async () => {
+    expect((await view(host, "thr-a")).pulls[0]!.state?.lifecycle).toMatchObject({ ci: { kind: "passing" } });
+  });
+  expect(reads()).toBe(2);
+  for (let index = 0; index < 3; index += 1) await view(host, "thr-a");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(reads()).toBe(2);
+
+  gitea.pulls.set(9, pull(9, { title: "Renamed" }));
+  await host.harness.behavior.callRpc("threadItems", { threadId: "thr-a", refresh: true });
+  await eventually(async () => {
+    expect((await view(host, "thr-a")).pulls[0]!.state?.title).toBe("Renamed");
+  });
+  expect(reads()).toBe(3);
+
+  gitea.pulls.set(9, pull(9, { state: "closed", merged: true, merged_at: "2026-11-16T13:00:00Z" }));
+  await host.harness.behavior.callRpc("comment", { repo: "acme/widgets", number: 9, body: "hi" });
+  await eventually(async () => {
+    expect((await view(host, "thr-a")).pulls[0]!.state?.lifecycle.state).toBe("merged");
+  });
+  expect(reads()).toBe(4);
+});
+
+it("reads only the open and never-read items of a thread and its children again on Refresh, and shows its issues' titles and states", { timeout: 60_000 }, async () => {
+  const { host, calls, gitea } = await startItems({
+    children: { "thr-a": [{ id: "thr-child", title: "Fix CI" }] },
+  });
+  gitea.pulls.set(9, pull(9, { state: "closed", merged: true, merged_at: "2026-11-16T13:00:00Z" }));
+  gitea.pulls.set(10, pull(10));
+  gitea.issues.add(4);
+  gitea.issues.add(5);
+  const link = (kind: "issue" | "pr", number: number, threadId = "thr-a") =>
+    host.harness.behavior.callRpc("linkItem", { repo: "acme/widgets", number, kind, threadId });
+  await link("pr", 9);
+  await link("pr", 10, "thr-child");
+  await link("issue", 4);
+  await link("issue", 5);
+  gitea.closedIssues.add(5);
+  runSweeps(host);
+  await eventually(async () => {
+    const items = await view(host, "thr-a");
+    expect(items.issues.map((entry) => [entry.number, entry.state?.title, entry.state?.state])).toEqual([
+      [5, "Issue 5", "closed"],
+      [4, "Issue 4", "open"],
+    ]);
+    expect(items.pulls.map((entry) => [entry.number, entry.state?.lifecycle.state])).toEqual([[10, "open"], [9, "merged"]]);
+    expect(items.summary).toMatchObject({ total: 2, open: 1, merged: 1 });
+  });
+  const reads = () => calls.map((call) => call.endpoint.split("?")[0]!.replace("/api/v1/repos/acme/widgets/", ""));
+  const before = reads().length;
+  await host.harness.behavior.callRpc("threadItems", { threadId: "thr-a", refresh: true });
+  // Rows due at once are read oldest first, so a wrongly expired #9 would be read before #10.
+  await eventually(() => expect(reads().slice(before)).toContain("issues/4"));
+  expect(reads().slice(before).filter((path) => /^(pulls|issues)\/\d+$/.test(path))).toEqual(["pulls/10", "issues/4"]);
 });
 
 it("copies the old kv link stores into the table, keeps the keys, and marks the import done only when every key was read", { timeout: 60_000 }, async () => {

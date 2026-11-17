@@ -28,15 +28,7 @@ import { draftTitle, isDraftTitle } from "./draft-title.js";
 import { branchRpcMethods } from "./branch-contract.js";
 import { registerBranchProvider } from "./branch-provider.js";
 import type { PullStatus } from "./branch-order.js";
-import {
-  checkStatus,
-  deriveCi,
-  deriveReview,
-  itemStatusSchema,
-  parsePull,
-  type CiStatus,
-  type ItemStatus,
-} from "./item-status.js";
+import { checkStatus } from "./item-status.js";
 import {
   archived,
   activePolicy,
@@ -95,7 +87,6 @@ import {
 } from "./gitea-errors.js";
 import {
   isThreadItemsCommand,
-  itemRefSchema,
   registerThreadItems,
   runThreadItemsCommand,
   threadItemsRpcMethods,
@@ -303,10 +294,6 @@ export const giteaRpcContract = defineRpcContract({
       conversation: conversationSchema,
       threadId: z.string().nullable(),
     }),
-  },
-  itemStatus: {
-    input: itemRefSchema.extend({ refresh: z.boolean().default(false) }),
-    output: z.object({ freshness: freshnessSchema, status: itemStatusSchema }),
   },
   pullFiles: {
     input: z.object({
@@ -523,7 +510,6 @@ const maxPages = 10;
 const maxReviewCommentReads = 50;
 const maxListRepositories = 50;
 const maxMergedPullPages = 2;
-const maxStatusPages = 4;
 const conversationPolicy: FreshnessPolicy = {
   freshMs: 15_000,
   retainMs: 10 * 60_000,
@@ -829,14 +815,8 @@ export default async function plugin(bb: BbPluginApi) {
     classify: classifyDisplayFailure,
     onBackgroundSettled: publishDisplay,
   });
-  const itemStatuses = new DisplayCache<ItemStatus>({
-    bounds: cacheBounds(128),
-    now: Date.now,
-    classify: classifyDisplayFailure,
-    onBackgroundSettled: publishDisplay,
-  });
-  const displays = [conversations, pullFiles, itemLists, myPullLists, myIssueLists, issueBlockers, itemStatuses];
-  const displayEntries = [64, 16, 32, 32, 32, 256, 128];
+  const displays = [conversations, pullFiles, itemLists, myPullLists, myIssueLists, issueBlockers];
+  const displayEntries = [64, 16, 32, 32, 32, 256];
   function forgetDisplay() {
     const removed = displays.map((cache) => cache.clear());
     if (removed.includes(true)) publishDisplay(null);
@@ -844,7 +824,6 @@ export default async function plugin(bb: BbPluginApi) {
   function forgetDisplayItem(repo: string, number: number) {
     const tag = itemKey(repo, number);
     conversations.invalidate(tag);
-    itemStatuses.invalidate(tag);
     publishDisplay(tag);
     threadItems.expire(repo, number);
   }
@@ -1423,60 +1402,6 @@ export default async function plugin(bb: BbPluginApi) {
       reviews: reviewPage.reviews,
       reviewsTruncated: reviewPage.truncated,
       reviewComments: reviewPage.reviewComments,
-    });
-  }
-
-  async function readCi(
-    repo: string,
-    head: string,
-    signal: AbortSignal,
-  ): Promise<CiStatus> {
-    const base = cleanBaseUrl(config.baseUrl);
-    try {
-      const statuses: unknown[] = [];
-      for (let page = 1; page <= maxStatusPages; page += 1) {
-        const query = new URLSearchParams({ limit: String(pageSize), page: String(page) });
-        const combined = record(
-          await api(repoPath(repo, `commits/${encodeURIComponent(head)}/status?${query}`), { signal }),
-        );
-        const rows = Array.isArray(combined.statuses) ? combined.statuses : [];
-        statuses.push(...rows);
-        if (rows.length === 0 || statuses.length >= (Number(combined.total_count) || 0)) break;
-      }
-      return deriveCi({ statuses }, (value) => safeLink(base, value));
-    } catch (error) {
-      if (signal.aborted || error instanceof GiteaAccessError) throw error;
-      return { kind: "unavailable" };
-    }
-  }
-
-  async function readItemStatus(
-    repo: string,
-    number: number,
-    kind: "issue" | "pr",
-    signal: AbortSignal,
-  ): Promise<ItemStatus> {
-    const base = cleanBaseUrl(config.baseUrl);
-    if (kind === "issue") {
-      const issue = mapItem(repo, await api(repoPath(repo, `issues/${number}`), { signal }), "issue", base);
-      return itemStatusSchema.parse({ ...issue, kind });
-    }
-    const pull = parsePull(await api(repoPath(repo, `pulls/${number}`), { signal }));
-    const identity = { kind, repo, number, title: pull.title, url: safeLink(base, pull.url) };
-    if (pull.state !== "open")
-      return itemStatusSchema.parse({ ...identity, lifecycle: { state: pull.state } });
-    const [ci, reviews] = await Promise.all([
-      pull.headSha ? readCi(repo, pull.headSha, signal) : { kind: "unavailable" as const },
-      paginated(repoPath(repo, `pulls/${number}/reviews`), signal),
-    ]);
-    return itemStatusSchema.parse({
-      ...identity,
-      lifecycle: {
-        state: "open",
-        draft: isDraftTitle(pull.title),
-        ci,
-        review: deriveReview(reviews.values, pull.requested),
-      },
     });
   }
 
@@ -2935,24 +2860,6 @@ export default async function plugin(bb: BbPluginApi) {
         freshness: freshnessView(display.freshness),
         conversation: display.value,
         threadId: threadId ?? null,
-      };
-    },
-    itemStatus: async (
-      { repo, number, kind, refresh },
-      { experimental_signal: signal }: RpcContext = {},
-    ) => {
-      const tag = itemKey(repo, number);
-      if (refresh) itemStatuses.invalidate(tag);
-      const key = await displayKey(`status-${kind}`, repo, number);
-      const display = await itemStatuses.read(
-        key,
-        tag,
-        (loadSignal) => readItemStatus(repo, number, kind, loadSignal),
-        { policy: conversationPolicy, signal },
-      );
-      return {
-        freshness: freshnessView(display.freshness),
-        status: display.value,
       };
     },
     pullFiles: async (

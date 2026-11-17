@@ -35,6 +35,7 @@
     "*.test.ts",
     "test-support.ts",
     "thread-items/*.ts",
+    "thread-items-panel.tsx",
     "app.tsx",
     "app-issue-filter.test.tsx",
     "app-agent-links.test.tsx",

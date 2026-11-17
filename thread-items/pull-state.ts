@@ -105,6 +105,10 @@ export function nextDueAt(
   }
 }
 
+/** Whether Refresh should read the item again: it was never read, or it is open. */
+export const canChange = (snapshot: ItemSnapshot | null) =>
+  snapshot === null || stateOf(snapshot) === "open";
+
 export function summarize(pulls: readonly ThreadPull[]): ThreadItemsSummary {
   const summary: ThreadItemsSummary = {
     total: pulls.length,

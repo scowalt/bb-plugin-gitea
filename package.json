@@ -62,6 +62,7 @@
     "thread-items/service.ts",
     "thread-items/store.ts",
     "app.tsx",
+    "thread-items-panel.tsx",
     "components",
     "lib",
     "icons",

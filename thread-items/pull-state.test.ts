@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CiStatus } from "../item-status";
-import { itemSnapshotSchema, type IssueSnapshot, type PullSnapshot, type ThreadPull } from "./contract";
-import { nextDueAt, readIssue, readPull, summarize } from "./pull-state";
+import { itemSnapshotSchema, pullSnapshotSchema, type IssueSnapshot, type PullSnapshot, type ThreadPull } from "./contract";
+import { canChange, nextDueAt, readIssue, readPull, summarize } from "./pull-state";
 
 const base = {
   title: "Change",
@@ -82,6 +82,14 @@ describe("nextDueAt", () => {
   });
 });
 
+describe("canChange", () => {
+  it("is true for items never read and open ones only", () => {
+    expect([null, open(ci.passing), issue("open"), merged, closed, issue("closed")].map(canChange)).toEqual([
+      true, true, true, false, false, false,
+    ]);
+  });
+});
+
 describe("summarize", () => {
   const row = (state: PullSnapshot | null, error: string | null = null): ThreadPull => ({
     repo: "acme/widgets", number: 1, url: "", state, error, stale: false,
@@ -101,5 +109,19 @@ describe("itemSnapshotSchema", () => {
   it("gives an issue no pull request fields", () => {
     expect(itemSnapshotSchema.parse({ ...issue("open"), lifecycle: merged.lifecycle, createdAt: "x" })).toEqual(issue("open"));
     expect(itemSnapshotSchema.safeParse({ ...merged, kind: "issue" }).success).toBe(false);
+  });
+});
+
+describe("pullSnapshotSchema", () => {
+  it("accepts an open pull request with its CI and review", () => {
+    expect(pullSnapshotSchema.safeParse(open(ci.failing)).success).toBe(true);
+  });
+
+  it("gives a merged pull request no CI to go stale", () => {
+    expect(pullSnapshotSchema.parse({ ...merged, lifecycle: { ...merged.lifecycle, ci: ci.failing } })).toEqual(merged);
+  });
+
+  it("rejects a failing CI that names no failed check", () => {
+    expect(pullSnapshotSchema.safeParse(open({ kind: "failing", total: 1, failed: [] })).success).toBe(false);
   });
 });

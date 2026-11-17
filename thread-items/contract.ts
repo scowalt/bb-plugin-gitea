@@ -58,8 +58,9 @@ export const threadPullSchema = z.object({
   number: itemNumber,
   url: z.string(),
   state: pullSnapshotSchema.nullable(),
-  /** Why the pull request could not be read, while it has never been read. */
+  /** Why the last read failed, while reads are failing. */
   error: z.string().nullable(),
+  /** The last read failed, so `state` is the last one read. */
   stale: z.boolean(),
   /** How the thread got this pull request: by itself, or only through a child thread. */
   via: z.discriminatedUnion("type", [
@@ -120,7 +121,8 @@ export const threadItemLinkSchema = itemRefSchema.extend({ threadId: z.string().
 
 export const threadItemsRpcMethods = {
   threadItems: {
-    input: z.object({ threadId: z.string().min(1) }),
+    /** `refresh` reads the view's open and never-read items again on the next sweep. */
+    input: z.object({ threadId: z.string().min(1), refresh: z.boolean().default(false) }),
     output: threadItemsViewSchema,
   },
   linkItem: {

@@ -3532,7 +3532,7 @@ it.each([
   expect(pullCiStatus(combined)).toBe(status);
 });
 
-describe("itemStatus", () => {
+describe("a linked pull request's review and CI status", () => {
   const pullUrl = "https://gitea.example/prefix/acme/widgets/pulls/9";
 
   function pullJson(extra: Record<string, unknown> = {}) {
@@ -3541,6 +3541,9 @@ describe("itemStatus", () => {
       title: "Ship the thing",
       state: "open",
       merged: false,
+      merged_at: null,
+      closed_at: null,
+      created_at: "2026-11-16T09:00:00Z",
       html_url: pullUrl,
       head: { ref: "feature", sha: headSha },
       base: { ref: "main", sha: baseSha },
@@ -3575,15 +3578,23 @@ describe("itemStatus", () => {
     };
   }
 
-  async function itemStatus(host: Host, input: Record<string, unknown> = {}) {
-    return giteaRpcContract.itemStatus.output.parse(
-      await host.harness.behavior.callRpc("itemStatus", {
-        repo: "acme/widgets",
-        number: 9,
-        kind: "pr",
-        ...input,
-      }),
-    );
+  const startLinking = (api: (call: TeaCall) => TeaReply) =>
+    start(api, { threads: { get: async ({ threadId }) => makeThreadResponse({ id: threadId }) } });
+
+  /** Links pull request 9 to a thread, lets the refresher read it, and returns the thread table's row for it. */
+  async function linkedPull(host: Host) {
+    await host.harness.behavior.callRpc("linkItem", { repo: "acme/widgets", number: 9, kind: "pr", threadId: "thr-a" });
+    const service = host.harness.behavior.runService("thread-items");
+    cleanups.push(() => {
+      service.controller.abort();
+      return service.done;
+    });
+    const row = async () =>
+      giteaRpcContract.threadItems.output.parse(
+        await host.harness.behavior.callRpc("threadItems", { threadId: "thr-a" }),
+      ).pulls[0]!;
+    await vi.waitFor(async () => expect((await row()).state).not.toBeNull(), { timeout: 30_000 });
+    return row();
   }
 
   const failingCi = {
@@ -3592,8 +3603,8 @@ describe("itemStatus", () => {
     failed: [{ name: "build", url: "https://gitea.example/acme/widgets/actions/runs/1/jobs/2" }],
   };
 
-  it("reads an open pull request with three calls: the pull, its CI and its reviews", async () => {
-    const { host, calls } = await start(
+  it("links an open pull request with one read, then refreshes it with three: the pull, its reviews and its head's status", async () => {
+    const { host, calls } = await startLinking(
       repoApi({
         reviews: [
           { user: null, team: { name: "dotnetapprovers" }, state: "REQUEST_REVIEW", dismissed: false, submitted_at: "2026-11-16T09:00:00Z" },
@@ -3601,28 +3612,29 @@ describe("itemStatus", () => {
         pull: { requested_reviewers_teams: [{ name: "dotnetapprovers" }] },
       }),
     );
-    expect((await itemStatus(host)).status).toEqual({
+    expect((await linkedPull(host)).state).toEqual({
       kind: "pr",
-      repo: "acme/widgets",
-      number: 9,
       title: "Ship the thing",
       url: pullUrl,
+      createdAt: "2026-11-16T09:00:00Z",
       lifecycle: {
         state: "open",
         draft: false,
+        headSha,
         ci: failingCi,
         review: { kind: "awaiting", reviewers: ["dotnetapprovers"] },
       },
     });
-    expect(calls.map((call) => call.endpoint.split("?")[0]).sort()).toEqual([
-      "/api/v1/repos/acme/widgets/commits/" + headSha + "/status",
+    expect(calls.map((call) => call.endpoint.split("?")[0])).toEqual([
+      "/api/v1/repos/acme/widgets/pulls/9",
       "/api/v1/repos/acme/widgets/pulls/9",
       "/api/v1/repos/acme/widgets/pulls/9/reviews",
+      "/api/v1/repos/acme/widgets/commits/" + headSha + "/status",
     ]);
   });
 
   it("lets a human's requested changes outrank an approval and marks a WIP title as a draft", async () => {
-    const { host } = await start(
+    const { host } = await startLinking(
       repoApi({
         pull: { title: "WIP: Ship the thing" },
         reviews: [
@@ -3631,35 +3643,19 @@ describe("itemStatus", () => {
         ],
       }),
     );
-    expect((await itemStatus(host)).status).toMatchObject({
+    expect((await linkedPull(host)).state).toMatchObject({
       lifecycle: { draft: true, review: { kind: "changes-requested", reviewers: ["ana"] } },
     });
   });
 
-  it("stops awaiting a requested user once they approve", async () => {
-    const { host } = await start(
-      repoApi({
-        pull: { requested_reviewers: [{ login: "ana" }] },
-        reviews: [{ user: { login: "ana" }, state: "APPROVED", dismissed: false, submitted_at: "2026-11-16T10:00:00Z" }],
-      }),
-    );
-    expect((await itemStatus(host)).status).toMatchObject({
-      lifecycle: { review: { kind: "approved", reviewers: ["ana"] } },
-    });
-  });
-
-  it("shows the CI as unknown when its read fails, but not when access is denied", async () => {
-    const unreadable = await start(repoApi({ status: { status: 500, json: {} } }));
-    expect((await itemStatus(unreadable.host)).status).toMatchObject({
-      lifecycle: { ci: { kind: "unavailable" } },
-    });
-    const denied = await start(repoApi({ status: { status: 403, json: {} } }));
-    await expect(itemStatus(denied.host)).rejects.toThrow("Gitea API returned HTTP 403.");
+  it("shows the CI as unknown when its read fails", async () => {
+    const { host } = await startLinking(repoApi({ status: { status: 500, json: {} } }));
+    expect((await linkedPull(host)).state).toMatchObject({ lifecycle: { ci: { kind: "unavailable" } } });
   });
 
   it("reads further status pages while the combined status reports more checks", async () => {
     const row = (index: number, status: string) => ({ context: `check-${index}`, status, target_url: "" });
-    const { host, calls } = await start((call) => {
+    const { host, calls } = await startLinking((call) => {
       if (!call.endpoint.includes("/status?")) return repoApi({})(call);
       const first = page(call.endpoint) === 1;
       return {
@@ -3671,66 +3667,26 @@ describe("itemStatus", () => {
         },
       };
     });
-    expect((await itemStatus(host)).status).toMatchObject({
+    expect((await linkedPull(host)).state).toMatchObject({
       lifecycle: { ci: { kind: "failing", total: 51, failed: [{ name: "check-50" }] } },
     });
     expect(calls.filter((call) => call.endpoint.includes("/status?"))).toHaveLength(2);
   });
 
   it.each([
-    ["merged", { state: "closed", merged: true }],
-    ["closed", { state: "closed", merged: false }],
-  ])("reads a %s pull request without any status or review call", async (state, pull) => {
-    const { host, calls } = await start(repoApi({ pull }));
-    expect((await itemStatus(host)).status).toEqual({
+    ["merged", { state: "closed", merged: true, merged_at: "2026-11-16T12:00:00Z" }, { mergedAt: "2026-11-16T12:00:00Z" }],
+    ["closed", { state: "closed", merged: false, closed_at: "2026-11-16T12:00:00Z" }, { closedAt: "2026-11-16T12:00:00Z" }],
+  ])("links a %s pull request with one read and never reads it again", async (state, pull, at) => {
+    const { host, calls } = await startLinking(repoApi({ pull }));
+    expect((await linkedPull(host)).state).toEqual({
       kind: "pr",
-      repo: "acme/widgets",
-      number: 9,
       title: "Ship the thing",
       url: pullUrl,
-      lifecycle: { state },
+      createdAt: "2026-11-16T09:00:00Z",
+      lifecycle: { state, ...at },
     });
     expect(calls.map((call) => call.endpoint.split("?")[0])).toEqual([
       "/api/v1/repos/acme/widgets/pulls/9",
     ]);
-  });
-
-  it("reads an issue from the issue alone", async () => {
-    const { host, calls } = await start(({ endpoint }) =>
-      endpoint.endsWith("/issues/7")
-        ? { json: { ...issue(7, "Broken thing"), state: "closed", body: "private details" } }
-        : { status: 404 },
-    );
-    const result = await itemStatus(host, { number: 7, kind: "issue" });
-    expect(result.status).toEqual({
-      kind: "issue",
-      repo: "acme/widgets",
-      number: 7,
-      title: "Broken thing",
-      url: "https://gitea.example/prefix/acme/widgets/issues/7",
-      state: "closed",
-    });
-    expect(calls.map((call) => call.endpoint)).toEqual(["/api/v1/repos/acme/widgets/issues/7"]);
-  });
-
-  it("serves a repeat read from the cache and rereads after refresh", async () => {
-    const { host, calls } = await start(repoApi({}));
-    const pullReads = () => calls.filter((call) => call.endpoint.endsWith("/pulls/9")).length;
-    await itemStatus(host);
-    await itemStatus(host);
-    expect(pullReads()).toBe(1);
-    await itemStatus(host, { refresh: true });
-    expect(pullReads()).toBe(2);
-  });
-
-  it("drops the cached status when a mutation changes the item", async () => {
-    const { host, calls } = await start((call) =>
-      call.method === "POST" ? { json: { id: 5 } } : repoApi({})(call),
-    );
-    const pullReads = () => calls.filter((call) => call.endpoint.endsWith("/pulls/9")).length;
-    await itemStatus(host);
-    await host.harness.behavior.callRpc("comment", { repo: "acme/widgets", number: 9, body: "hi" });
-    await itemStatus(host);
-    expect(pullReads()).toBe(2);
   });
 });
