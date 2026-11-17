@@ -210,3 +210,40 @@ it("leaves the context row to the card while the pane shows the thread context c
   expect(screen.getByTestId("context-row").dataset.visible).toBe("false");
   expect(requests).toEqual([]);
 });
+
+const cardRow = app.threadContextCardRows.find((registration) => registration.id === "pulls")!;
+
+function card(rows: Rows, kind: "card" | "banner" = "card") {
+  const { requests, options } = keyed(rows);
+  const slot = renderSlot(cardRow, { threadId: "thr_a", projectId: "proj_a", environment: null }, {
+    ...options,
+    threadContextKind: kind,
+  });
+  return { slot, requests };
+}
+
+it("lists the thread's pull requests on the context card with their titles and chips, and collapses past three", async () => {
+  expect(cardRow.group).toBe("4_pullRequest");
+  card({ thr_a: five });
+  const failingRow = await screen.findByTitle("acme/ops#4 · Change 4 · 1 failing");
+  expect(failingRow.textContent).toContain("#4 Change 4");
+  expect(screen.getByText("1 failing").closest("span")!.className).toContain("bg-red-500/15");
+  expect(screen.getByTitle("acme/ops#2 · Checking").textContent).toContain("#2 acme/ops");
+  expect(screen.getByTitle("acme/camp#1 · Change 1 · Passing")).toBeTruthy();
+  expect(screen.getByText("+2 more pull requests")).toBeTruthy();
+  expect(screen.queryByText(/#5|#3/)).toBeNull();
+});
+
+it("opens the Gitea tab from a card row", async () => {
+  const { slot } = card({ thr_a: five });
+  fireEvent.click(await screen.findByText("#4 Change 4"));
+  fireEvent.click(screen.getByText("+2 more pull requests"));
+  expect(slot.inspection.experimental_panelCalls).toEqual([giteaTabOpen, giteaTabOpen]);
+});
+
+it("draws no card row while the thread has no pull request", async () => {
+  const { slot, requests } = card({ thr_a: row() });
+  await act(async () => {});
+  expect(requests).toEqual([["thr_a"]]);
+  expect(slot.container.textContent).toBe("");
+});

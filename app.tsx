@@ -10,6 +10,7 @@ import {
 } from "react";
 import {
   definePluginApp,
+  experimental_THREAD_INFO_ROW_GROUPS,
   experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
   useRealtime,
@@ -27,6 +28,7 @@ import { GITEA_BRANCH_ENVIRONMENT_PROVIDER_ID } from "./branch-inputs.js";
 import { GiteaThreadPanel } from "./thread-items-panel.js";
 import {
   giteaTab,
+  PullsCardRows,
   PullsSegment,
   pullCountAction,
   usePullCounts,
@@ -3259,6 +3261,12 @@ export default definePluginApp((app) => {
     order: 20,
     summary: PullsSegment,
     useVisible: usePullsSegmentVisible,
+  });
+  app.slots.experimental_threadContextCardRow({
+    id: "pulls",
+    group: experimental_THREAD_INFO_ROW_GROUPS.pullRequest,
+    order: 20,
+    component: PullsCardRows,
   });
   app.slots.experimental_appOverlay({
     id: "display-scope",

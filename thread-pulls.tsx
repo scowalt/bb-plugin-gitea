@@ -1,9 +1,11 @@
 import { useMemo } from "react";
 import {
+  experimental_ThreadContextCardRow as ThreadContextCardRow,
   experimental_useAppPanel,
   experimental_useRpcKeyedQuery,
   experimental_useThreadContextKind,
   type ExperimentalPanelController,
+  type ExperimentalThreadContextCardProps,
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
   type PluginThreadAction,
@@ -12,7 +14,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { ThreadItemsSummary, ThreadPull, ThreadPulls } from "./thread-items/contract.js";
 import { threadPullsReadContract } from "./thread-items/read-contract.js";
-import { chipFor, ciChips, lifecycleChips, toneClasses, type ChipSpec } from "./thread-items-panel.js";
+import { chipFor, ciChips, lifecycleChips, StatusChip, toneClasses, type ChipSpec } from "./thread-items-panel.js";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -156,5 +158,34 @@ export function PullsSegment({ threadId }: ExperimentalThreadContextSegmentProps
         </button>
       )}
     </span>
+  );
+}
+
+/** The thread's pull requests on the thread context card, one row each with its title and the table's chip. */
+export function PullsCardRows({ threadId }: ExperimentalThreadContextCardProps) {
+  const pulls = byAttention(useOwnPulls(threadId));
+  const panel = experimental_useAppPanel();
+  const more = pulls.length - shownPulls;
+  const open = () => void openGiteaTab(panel);
+  return (
+    <>
+      {pulls.slice(0, shownPulls).map((pull) => (
+        <ThreadContextCardRow
+          key={`${pull.repo}#${pull.number}`}
+          icon="gitea/teacup"
+          label={`#${pull.number} ${pull.state?.title ?? pull.repo}`}
+          trailing={<StatusChip spec={{ ...pullChip(pull), href: undefined }} />}
+          title={describePull(pull)}
+          onClick={open}
+        />
+      ))}
+      {more > 0 && (
+        <ThreadContextCardRow
+          icon="GitPullRequest"
+          label={`+${more} more pull ${more === 1 ? "request" : "requests"}`}
+          onClick={open}
+        />
+      )}
+    </>
   );
 }
