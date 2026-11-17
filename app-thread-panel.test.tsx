@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import type { ComponentType } from "react";
 import { afterAll, afterEach, expect, it, vi } from "vitest";
+import type { ExperimentalThreadActionTabProps } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { CiStatus, ReviewStatus } from "./item-status.js";
 import type { LinkSource, PullSnapshot, ThreadIssue, ThreadItemsView, ThreadPull } from "./thread-items/contract.js";
@@ -82,15 +84,13 @@ function view(pulls: ThreadPull[], extra: Partial<ThreadItemsView> = {}, threadI
   return { threadId, server, scanning: false, descendantsTruncated: false, pulls, issues: [], summary: summarize(pulls), ...extra };
 }
 
-function mount(threadItems: (input: { threadId: string; refresh: boolean }) => unknown) {
-  return renderSlot(app.threadPanelActions[0]!, { threadId: "thr_existing", params: null }, {
-    rpc: { threadItems: (input: unknown) => threadItems(input as { threadId: string; refresh: boolean }) },
-  });
-}
+const tab = app.tabs.find((registration) => registration.id === "item");
+if (tab?.context.kind !== "thread" || tab.availability !== "action") throw new Error("The Gitea tab is not a thread action tab");
+const Panel = tab.component as ComponentType<ExperimentalThreadActionTabProps>;
 
-function header(threadItems: () => unknown) {
-  return renderSlot(app.threadHeaderActions[0]!, { threadId: "thr_existing", projectId: "project-1", isCompactViewport: false }, {
-    rpc: { threadItems },
+function mount(threadItems: (input: { threadId: string; refresh: boolean }) => unknown) {
+  return renderSlot({ component: Panel }, { threadId: "thr_existing", environment: null, params: null }, {
+    rpc: { threadItems: (input: unknown) => threadItems(input as { threadId: string; refresh: boolean }) },
   });
 }
 
@@ -262,36 +262,9 @@ it("drops a late answer for the thread the panel showed before", async () => {
     }
     return view([camp], {}, "thr_other");
   });
-  const Panel = app.threadPanelActions[0]!.component;
-  slot.lifecycle.rerender(<Panel threadId="thr_other" params={null} />);
+  slot.lifecycle.rerender(<Panel threadId="thr_other" environment={null} params={null} />);
   await screen.findByText("Add the pager");
   await act(async () => release());
   expect(screen.queryByText("Old fix")).toBeNull();
   expect(screen.getByText("Add the pager")).toBeTruthy();
-});
-
-it("counts the thread's pull requests in the header and opens the table", async () => {
-  const empty = header(() => view([]));
-  await act(async () => {});
-  expect(empty.container.textContent).toBe("");
-  empty.unmount();
-
-  const ok = open(passing);
-  const failing = open({ kind: "failing", total: 1, failed: [{ name: "lint", url: "" }] });
-  const running = open({ kind: "running", total: 1, pending: 1, url: "" });
-  const cases: [ThreadPull[], string, string][] = [
-    [[shipped, { ...shipped, number: 1 }, pull("acme/ops", 3, "c", ok)], "3 PRs · 2 merged", "bg-green-500"],
-    [[shipped, pull("acme/ops", 2, "b", failing), pull("acme/ops", 3, "c", running)], "3 PRs · 1 merged", "bg-red-500"],
-    [[pull("acme/ops", 1, "a", running)], "1 PR", "bg-yellow-500"],
-    [[shipped, { ...shipped, number: 1 }], "2 PRs · 2 merged", "bg-purple-500"],
-  ];
-  for (const [pulls, text, dot] of cases) {
-    const slot = header(() => view(pulls));
-    const button = await screen.findByRole("button", { name: /Gitea pull requests/ });
-    expect(button.textContent).toBe(text);
-    expect(within(button).getByTestId("pull-count-dot").className).toContain(dot);
-    fireEvent.click(button);
-    expect(slot.navigateCalls).toEqual([{ method: "openThreadPanel", options: { actionId: "item" } }]);
-    slot.unmount();
-  }
 });

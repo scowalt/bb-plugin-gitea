@@ -5,6 +5,7 @@ import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin, { giteaRpcContract } from "./server";
 import { cleanups, start, type Host, type TeaCall, type TeaReply } from "./test-support";
 import { importedKey } from "./thread-items/legacy-import";
+import { threadPullsKeyTag, threadPullsTag } from "./thread-items/read-contract";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -124,10 +125,14 @@ async function startItems(options: {
           if (threadId === "thr-gone") throw Object.assign(new Error("not found"), { code: "thread_not_found" });
           return makeThreadResponse({ id: threadId });
         },
-        list: async (args) =>
-          (children.get(args?.parentThreadId ?? "") ?? [])
+        list: async (args) => {
+          const all = [...children].flatMap(([parent, kids]) => kids.map((kid) => ({ ...kid, parent })));
+          const ids = args?.threadIds;
+          return all
+            .filter((child) => (ids ? ids.includes(child.id) : child.parent === args?.parentThreadId))
             .filter((child) => Boolean(child.archived) === Boolean(args?.archived))
-            .map((child) => ({ id: child.id, title: child.title, titleFallback: null })),
+            .map((child) => ({ id: child.id, title: child.title, titleFallback: null, parentThreadId: child.parent }));
+        },
       },
     },
   );
@@ -602,4 +607,187 @@ it("links, lists, and unlinks issues and pull requests from the CLI for this thr
   await expect(cli(["unlink", "pr", "acme/widgets", "4"], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "pr acme/widgets#4 was not linked to thr-a." });
   await expect(cli(["unlink", `${server}acme/widgets/issues/4`], "thr-a")).resolves.toMatchObject({ exitCode: 0, stdout: "Unlinked issue acme/widgets#4 from thr-a." });
   await expect(cli(["thread"], "thr-a")).resolves.toMatchObject({ stdout: "No Gitea pull requests are linked to this thread." });
+});
+
+async function threadPulls(host: Host, keys: string[]) {
+  return giteaRpcContract.threadPulls.output.parse(await host.harness.behavior.callRpc("threadPulls", { keys }));
+}
+
+const pullInvalidations = (host: Host) =>
+  host.harness.inspection.experimental_rpcInvalidations.filter((tags) => tags?.includes(threadPullsTag)).length;
+
+it("answers a keyed read of many threads from the stored links and states, reading no events and no Gitea", async () => {
+  const { host, calls } = await startItems({
+    events: { root: push(1, t0, 9), child: create(1, t0 + minute, 11), other: push(1, t0, 12) },
+    children: { root: [{ id: "child", title: "Fix CI" }] },
+  });
+  for (const id of ["root", "child", "other"]) await idle(host, id);
+  const events = eventReads(host).length;
+  const tea = calls.length;
+  const rows = await threadPulls(host, ["root", "other", "quiet"]);
+  expect(Object.keys(rows).sort()).toEqual(["other", "quiet", "root"]);
+  expect(rows.root!.pulls.map((entry) => [entry.number, entry.via.type])).toEqual([[11, "child"], [9, "own"]]);
+  expect(rows.root!.summary).toMatchObject({ total: 2, checking: 2 });
+  expect(rows.other!.pulls.map((entry) => entry.number)).toEqual([12]);
+  expect(rows.quiet).toEqual({ pulls: [], summary: expect.objectContaining({ total: 0 }) });
+  expect(giteaRpcContract.threadPullBadges.output.parse(
+    await host.harness.behavior.callRpc("threadPullBadges", { keys: ["root", "other", "quiet"] }),
+  )).toEqual(rows);
+  expect(() => host.harness.behavior.experimental_watchRpc("threadPullBadges", { key: "root" })).toThrow(/no watch producer/);
+  expect(eventReads(host)).toHaveLength(events);
+  expect(calls).toHaveLength(tea);
+});
+
+/** 20 root threads, each with 5 children of 5 children: 620 threads, as a long sidebar has. */
+function forest() {
+  const children: Record<string, Child[]> = {};
+  const ids: string[] = [];
+  for (let r = 0; r < 20; r += 1) {
+    const root = `r${r}`;
+    ids.push(root);
+    children[root] = [];
+    for (let c = 0; c < 5; c += 1) {
+      const child = `${root}-c${c}`;
+      ids.push(child);
+      children[root].push({ id: child, title: child });
+      children[child] = [];
+      for (let g = 0; g < 5; g += 1) {
+        ids.push(`${child}-g${g}`);
+        children[child].push({ id: `${child}-g${g}`, title: `${child}-g${g}` });
+      }
+    }
+  }
+  return { children, ids };
+}
+
+async function badges(host: Host, ids: string[]) {
+  const batches = [];
+  for (let at = 0; at < ids.length; at += 200) batches.push(ids.slice(at, at + 200));
+  const rows = await Promise.all(batches.map(async (keys) =>
+    giteaRpcContract.threadPullBadges.output.parse(await host.harness.behavior.callRpc("threadPullBadges", { keys }))));
+  return Object.fromEntries(
+    rows.flatMap((batch) => Object.entries(batch))
+      .filter(([, value]) => value.summary.total > 0)
+      .map(([id, value]) => [id, value.pulls.map((entry) => entry.number)]),
+  );
+}
+
+const threadLists = (host: Host) => host.harness.sdk.callsTo("threads.list").length;
+
+it("badges a sidebar of hundreds of threads by asking bb only about the few linked threads and those above them", async () => {
+  const { children, ids } = forest();
+  const { host } = await startItems({
+    events: { "r0-c0-g0": push(1, t0, 21), "r1-c2": push(1, t0, 22), r2: push(1, t0, 23) },
+    children,
+  });
+  for (const id of ["r0-c0-g0", "r1-c2", "r2"]) await idle(host, id);
+  const before = threadLists(host);
+  expect(await badges(host, ids)).toEqual({
+    r0: [21], "r0-c0": [21], "r0-c0-g0": [21],
+    r1: [22], "r1-c2": [22],
+    r2: [23],
+  });
+  // Two lists (archived and not) per level above the linked threads, at most four levels.
+  expect(threadLists(host) - before).toBeLessThanOrEqual(8);
+  const once = threadLists(host);
+  await badges(host, ids);
+  expect(threadLists(host)).toBe(once);
+});
+
+it("reads the threads above linked ones again when one of them moves or is deleted, and not for other threads", async () => {
+  const { children, ids } = forest();
+  const { host } = await startItems({
+    events: { "r0-c0-g0": push(1, t0, 21), "r1-c2": push(1, t0, 22) },
+    children,
+  });
+  for (const id of ["r0-c0-g0", "r1-c2"]) await idle(host, id);
+  await badges(host, ids);
+  const stale = pullInvalidations(host);
+
+  const moved = children.r0!.splice(0, 1);
+  children.r1!.push(...moved);
+  await host.harness.behavior.emitThreadEvent("experimental_thread.parentChanged", {
+    thread: makeThreadResponse({ id: "r0-c0", parentThreadId: "r1" }),
+    previousParentThreadId: "r0",
+  });
+  expect(pullInvalidations(host)).toBe(stale + 1);
+  expect(await badges(host, ids)).toEqual({
+    r1: [22, 21], "r0-c0": [21], "r0-c0-g0": [21], "r1-c2": [22],
+  });
+
+  await host.harness.behavior.emitThreadEvent("experimental_thread.parentChanged", {
+    thread: makeThreadResponse({ id: "r5-c1", parentThreadId: "r6" }),
+    previousParentThreadId: "r5",
+  });
+  await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "r7", deletedAt: 1 }) });
+  expect(pullInvalidations(host)).toBe(stale + 1);
+
+  children.r1!.splice(children.r1!.findIndex((child) => child.id === "r1-c2"), 1);
+  await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "r1-c2", deletedAt: 1 }) });
+  expect(pullInvalidations(host)).toBe(stale + 2);
+  expect(await badges(host, ids)).toEqual({ r1: [21], "r0-c0": [21], "r0-c0-g0": [21], "r1-c2": [22] });
+});
+
+it("marks the keyed reads stale when a thread gains a pull request and when a refresh stores a new state", { timeout: 60_000 }, async () => {
+  const { host, gitea } = await startItems({ events: { "thr-a": create(1, t0, 9) } });
+  gitea.pulls.set(9, pull(9));
+  gitea.statuses.set(sha("a"), "success");
+  expect(pullInvalidations(host)).toBe(0);
+  await idle(host, "thr-a");
+  expect(pullInvalidations(host)).toBe(1);
+  runSweeps(host);
+  await eventually(async () => {
+    expect((await threadPulls(host, ["thr-a"]))["thr-a"]!.pulls[0]!.state?.lifecycle).toMatchObject({ ci: { kind: "passing" } });
+  });
+  expect(pullInvalidations(host)).toBeGreaterThanOrEqual(2);
+});
+
+it("reads a watched thread's new commands every 30 seconds and keeps its open pull requests fresh until the last client leaves", { timeout: 60_000 }, async () => {
+  vi.useFakeTimers({ toFake: ["Date"], now: t0 });
+  const { host, calls, events, gitea } = await startItems({ events: { "thr-a": create(1, t0, 9) } });
+  gitea.pulls.set(9, pull(9));
+  gitea.statuses.set(sha("a"), "pending");
+  const shownPulls = async () =>
+    (await threadPulls(host, ["thr-a"]))["thr-a"]!.pulls.map((entry) => {
+      const lifecycle = entry.state?.lifecycle;
+      return `${entry.number}:${lifecycle?.state === "open" ? lifecycle.ci.kind : "checking"}`;
+    });
+  await idle(host, "thr-a");
+  runSweeps(host);
+  await eventually(async () => expect(await shownPulls()).toEqual(["9:running"]));
+  gitea.statuses.set(sha("a"), "success");
+  await vi.advanceTimersByTimeAsync(5 * minute);
+  expect(pullReads(calls)).toBe(1);
+
+  const stop = host.harness.behavior.experimental_watchRpc("threadPulls", { key: "thr-a" });
+  await eventually(async () => expect(await shownPulls()).toEqual(["9:passing"]));
+  expect(pullReads(calls)).toBe(2);
+  gitea.statuses.set(sha("a"), "failure");
+  gitea.pulls.set(10, pull(10, { head: { sha: sha("b") } }));
+  events.set("thr-a", [...events.get("thr-a")!, ...push(3, t0, 10)]);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await eventually(async () => expect(await shownPulls()).toEqual(["10:running", "9:failing"]));
+
+  stop();
+  const watched = eventReads(host).length;
+  await vi.advanceTimersByTimeAsync(2 * minute);
+  expect(eventReads(host)).toHaveLength(watched);
+});
+
+it("marks a watched thread's rows stale when its next look finds a new child thread's pull request, which publishes nothing", async () => {
+  const { host, children } = await startItems({ events: { root: push(1, t0, 9), child: create(1, t0, 11) } });
+  for (const id of ["root", "child"]) await idle(host, id);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now: t0 + 10 * minute });
+  const rootInvalidations = () =>
+    host.harness.inspection.experimental_rpcInvalidations.filter((tags) => tags?.includes(threadPullsKeyTag("root"))).length;
+  const published = pullInvalidations(host);
+  cleanups.push(host.harness.behavior.experimental_watchRpc("threadPulls", { key: "root" }));
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(rootInvalidations()).toBe(0);
+
+  children.set("root", [{ id: "child", title: "Fix CI" }]);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await eventually(() => expect(rootInvalidations()).toBe(1));
+  expect(pullInvalidations(host)).toBe(published);
+  expect((await threadPulls(host, ["root"])).root!.pulls.map((entry) => entry.number)).toEqual([11, 9]);
 });

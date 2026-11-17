@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-gitea",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Gitea issues and pull requests inside BB, backed by the Gitea tea CLI.",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.44",
-    "bbPluginSdk": ">=0.5.29"
+    "bbPluginSdk": ">=0.6.146"
   },
   "bb": {
     "name": "Gitea",
@@ -45,6 +45,7 @@
     "display-cache.ts",
     "pull-files-view.ts",
     "auto-fixer.ts",
+    "execution.ts",
     "repository.ts",
     "gitea-errors.ts",
     "draft-title.ts",
@@ -54,15 +55,18 @@
     "thread-items/index.ts",
     "thread-items/cli.ts",
     "thread-items/contract.ts",
+    "thread-items/ancestry.ts",
     "thread-items/detect.ts",
     "thread-items/legacy-import.ts",
     "thread-items/pull-state.ts",
+    "thread-items/read-contract.ts",
     "thread-items/refresher.ts",
     "thread-items/scanner.ts",
     "thread-items/service.ts",
     "thread-items/store.ts",
     "app.tsx",
     "thread-items-panel.tsx",
+    "thread-pulls.tsx",
     "components",
     "lib",
     "icons",
@@ -79,10 +83,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.5.29",
-    "@pierre/diffs": "^1.2.9",
-    "@radix-ui/react-popover": "^1.1.23",
-    "@radix-ui/react-select": "^2.3.3",
+    "@get-bb/plugin-sdk": "0.6.146",
+    "@pierre/diffs": "~1.2.12",
+    "@radix-ui/react-popover": "^1.3.1",
+    "@radix-ui/react-select": "^2.4.1",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
@@ -95,7 +99,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sonner": "^1.7.4",
-    "tailwind-merge": "^3.4.0",
+    "tailwind-merge": "^3.7.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vitest": "^4.1.1"
   }

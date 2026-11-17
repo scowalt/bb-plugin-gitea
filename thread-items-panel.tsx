@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   UrlLink,
-  useBbNavigate,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
-  type PluginThreadHeaderActionProps,
-  type PluginThreadPanelProps,
+  type ExperimentalThreadActionTabProps,
 } from "@get-bb/plugin-sdk/app";
 import type { giteaRpcContract } from "./server.js";
 import type { CiStatus, ReviewStatus } from "./item-status.js";
@@ -63,7 +61,7 @@ export function useThreadItems(threadId: string) {
 }
 
 type Tone = "green" | "red" | "amber" | "purple" | "muted";
-type ChipSpec = {
+export type ChipSpec = {
   label: string;
   tone: Tone;
   icon: string;
@@ -74,7 +72,7 @@ type ChipTable<U extends { kind: string }> = {
   [K in U["kind"]]: (status: Extract<U, { kind: K }>) => ChipSpec;
 };
 
-const toneClasses: Record<Tone, string> = {
+export const toneClasses: Record<Tone, string> = {
   green: "bg-green-500/15 text-green-700 dark:text-green-400",
   red: "bg-red-500/15 text-red-600 dark:text-red-400",
   amber: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400",
@@ -108,7 +106,7 @@ const reviewChips: ChipTable<ReviewStatus> = {
   none: () => ({ label: "No review", tone: "muted", icon: "Minus", title: "No review" }),
 };
 
-const ciChips: ChipTable<CiStatus> = {
+export const ciChips: ChipTable<CiStatus> = {
   passing: ({ total }) => ({
     label: "Passing",
     tone: "green",
@@ -139,12 +137,12 @@ const ciChips: ChipTable<CiStatus> = {
 };
 
 // The tables are exhaustive over `kind` by their mapped type, so the entry always accepts its own status.
-function chipFor<U extends { kind: string }>(table: ChipTable<U>, status: U): ChipSpec {
+export function chipFor<U extends { kind: string }>(table: ChipTable<U>, status: U): ChipSpec {
   const make = table[status.kind as U["kind"]] as (status: U) => ChipSpec;
   return make(status);
 }
 
-const lifecycleChips: Record<"merged" | "closed", ChipSpec> = {
+export const lifecycleChips: Record<"merged" | "closed", ChipSpec> = {
   merged: { label: "Merged", tone: "purple", icon: "GitMerge", title: "Merged" },
   closed: { label: "Closed", tone: "muted", icon: "X", title: "Closed without merging" },
 };
@@ -154,7 +152,7 @@ const issueChips: Record<"open" | "closed", ChipSpec> = {
   closed: { label: "Issue · Closed", tone: "muted", icon: "Check", title: "Closed issue" },
 };
 
-function StatusChip({ spec }: { spec: ChipSpec }) {
+export function StatusChip({ spec }: { spec: ChipSpec }) {
   const chip = (
     <span
       title={spec.title}
@@ -317,7 +315,7 @@ function IssueRow({ issue }: { issue: ThreadIssue }) {
 }
 
 /** The thread's pull requests, its own and its child threads', and its own issues, with review and CI status. */
-export function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
+export function GiteaThreadPanel({ threadId }: ExperimentalThreadActionTabProps) {
   const { view, error, refetch } = useThreadItems(threadId);
   if (!view)
     return <div className="p-4 text-sm text-muted-foreground">{error ?? "Loading Gitea items…"}</div>;
@@ -369,50 +367,5 @@ export function GiteaThreadPanel({ threadId }: PluginThreadPanelProps) {
         </div>
       )}
     </div>
-  );
-}
-
-function dotClass(summary: ThreadItemsView["summary"]): string {
-  if (summary.ciFailing > 0) return "bg-red-500";
-  if (summary.ciRunning > 0) return "bg-yellow-500";
-  if (summary.merged === summary.total) return "bg-purple-500";
-  return "bg-green-500";
-}
-
-function countText(summary: ThreadItemsView["summary"]): string {
-  const prs = `${summary.total} ${summary.total === 1 ? "PR" : "PRs"}`;
-  return summary.merged > 0 ? `${prs} · ${summary.merged} merged` : prs;
-}
-
-function breakdown(summary: ThreadItemsView["summary"]): string {
-  const parts = [
-    `${summary.open} open`,
-    `${summary.merged} merged`,
-    `${summary.closed} closed`,
-    ...(summary.checking ? [`${summary.checking} checking`] : []),
-    ...(summary.unreadable ? [`${summary.unreadable} unreadable`] : []),
-    ...(summary.ciFailing ? [`${summary.ciFailing} with failing CI`] : []),
-    ...(summary.ciRunning ? [`${summary.ciRunning} with CI running`] : []),
-  ];
-  return `Gitea pull requests: ${parts.join(", ")}`;
-}
-
-/** The thread header's pull request count; hidden until the thread has one. */
-export function ThreadPullCount({ threadId }: PluginThreadHeaderActionProps) {
-  const navigate = useBbNavigate();
-  const { view } = useThreadItems(threadId);
-  if (!view || view.summary.total === 0) return null;
-  const { summary } = view;
-  return (
-    <button
-      type="button"
-      aria-label={breakdown(summary)}
-      title={breakdown(summary)}
-      className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-      onClick={() => navigate.openThreadPanel({ actionId: "item" })}
-    >
-      <span aria-hidden="true" data-testid="pull-count-dot" className={cn("size-2 rounded-full", dotClass(summary))} />
-      {countText(summary)}
-    </button>
   );
 }

@@ -1,24 +1,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { autoFixerExecutionSchema } from "./execution.js";
 import { repositoryPattern, repositorySchema } from "./repository.js";
 
-export const autoFixerExecutionSchema = z
-  .object({
-    providerId: z.string().min(1),
-    model: z.string().min(1),
-    reasoningLevel: z.enum([
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "none",
-      "ultra",
-      "ultracode",
-    ]),
-    serviceTier: z.enum(["fast", "default"]),
-  })
-  .strict();
 export const autoFixerPolicySchema = z.union([
   z.object({ fix: z.literal(true), merge: z.boolean() }).strict(),
   z.object({ fix: z.literal(false), merge: z.literal(true) }).strict(),
